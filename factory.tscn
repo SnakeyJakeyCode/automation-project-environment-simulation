@@ -1,8 +1,11 @@
 [gd_scene format=3 uid="uid://esm5gslhlde6"]
 
+[ext_resource type="PackedScene" uid="uid://bjoefar384f5w" path="res://assets/machines/Cutter_LaserBed.glb" id="1_br4io"]
+[ext_resource type="PackedScene" uid="uid://dqhwote23yjqr" path="res://assets/machines/Bender_PressBrake.glb" id="1_keyo3"]
 [ext_resource type="Texture2D" uid="uid://c3ss5gldsbnw8" path="res://kloofendal_48d_partly_cloudy_puresky_4k.exr" id="1_oq3xt"]
 [ext_resource type="Script" uid="uid://b1sl6tc5xgrm8" path="res://robot_system.gd" id="1_qjjrk"]
 [ext_resource type="Script" uid="uid://bqjf26qgfxpbq" path="res://player.gd" id="2_xaprj"]
+[ext_resource type="PackedScene" uid="uid://fnyd3trp03g6" path="res://assets/machines/Welder_Gantry.glb" id="3_h5ffw"]
 
 [sub_resource type="BoxMesh" id="BoxMesh_fjy48"]
 size = Vector3(24, 0.2, 14)
@@ -125,6 +128,9 @@ mesh = SubResource("SphereMesh_fjy48")
 [node name="LaserCollision" type="CollisionShape3D" parent="LaserCutter/LaserBody" unique_id=1321422775]
 shape = SubResource("BoxShape3D_xaprj")
 
+[node name="Cutter_LaserBed2" parent="LaserCutter" unique_id=416561975 instance=ExtResource("1_br4io")]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, -3.1333952, -1.25, -0.1849556)
+
 [node name="Bender" type="MeshInstance3D" parent="." unique_id=1482631492]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 1.25, -3)
 mesh = SubResource("BoxMesh_xaprj")
@@ -138,6 +144,9 @@ mesh = SubResource("SphereMesh_fjy48")
 [node name="BenderCollision" type="CollisionShape3D" parent="Bender/BenderBody" unique_id=1951063560]
 shape = SubResource("BoxShape3D_qjjrk")
 
+[node name="Bender_PressBrake2" parent="Bender" unique_id=2095308421 instance=ExtResource("1_keyo3")]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0.027092457, -1.25, 2.4497285)
+
 [node name="WeldCell" type="MeshInstance3D" parent="." unique_id=715920968]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 1.25, -3)
 mesh = SubResource("BoxMesh_xaprj")
@@ -150,6 +159,9 @@ mesh = SubResource("SphereMesh_fjy48")
 
 [node name="WeldCollision" type="CollisionShape3D" parent="WeldCell/WeldBody" unique_id=2146872467]
 shape = SubResource("BoxShape3D_qjjrk")
+
+[node name="Welder_Gantry2" parent="WeldCell" unique_id=1002987549 instance=ExtResource("3_h5ffw")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.10845673, -1.25, 3)
 
 [node name="Inspection" type="MeshInstance3D" parent="." unique_id=2097605180]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7, 1.25, -3)
