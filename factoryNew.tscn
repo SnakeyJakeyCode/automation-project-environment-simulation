@@ -1,0 +1,324 @@
+[gd_scene format=3 uid="uid://eostduqr68e"]
+
+[ext_resource type="PackedScene" uid="uid://bjoefar384f5w" path="res://assets/machines/Cutter_LaserBed.glb" id="1_br4io"]
+[ext_resource type="PackedScene" uid="uid://dqhwote23yjqr" path="res://assets/machines/Bender_PressBrake.glb" id="1_keyo3"]
+[ext_resource type="Texture2D" uid="uid://c3ss5gldsbnw8" path="res://kloofendal_48d_partly_cloudy_puresky_4k.exr" id="1_oq3xt"]
+[ext_resource type="Script" uid="uid://b1sl6tc5xgrm8" path="res://robot_system.gd" id="1_qjjrk"]
+[ext_resource type="Script" uid="uid://bqjf26qgfxpbq" path="res://player.gd" id="2_xaprj"]
+[ext_resource type="PackedScene" uid="uid://fnyd3trp03g6" path="res://assets/machines/Welder_Gantry.glb" id="3_h5ffw"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_fjy48"]
+size = Vector3(24, 0.2, 14)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_oq3xt"]
+size = Vector3(24, 0.2, 14)
+
+[sub_resource type="SphereMesh" id="SphereMesh_fjy48"]
+radius = 0.15
+height = 0.3
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_xaprj"]
+size = Vector3(3.5, 2.5, 3)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_qjjrk"]
+size = Vector3(3.5, 2.5, 3)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_fjy48"]
+albedo_color = Color(0.7372549, 0.9843137, 0.40784314, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_xaprj"]
+material = SubResource("StandardMaterial3D_fjy48")
+size = Vector3(3.5, 2.5, 3)
+
+[sub_resource type="BoxMesh" id="BoxMesh_qjjrk"]
+size = Vector3(23, 0.3, 0.6)
+
+[sub_resource type="BoxMesh" id="BoxMesh_keyo3"]
+size = Vector3(1.4, 0.2, 1.2)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_fjy48"]
+top_radius = 0.55
+bottom_radius = 0.55
+height = 0.6
+
+[sub_resource type="BoxMesh" id="BoxMesh_y1mhp"]
+size = Vector3(0.35, 1.8, 0.35)
+
+[sub_resource type="BoxMesh" id="BoxMesh_br4io"]
+size = Vector3(0.3, 1.4, 0.3)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_oq3xt"]
+top_radius = 0.22
+bottom_radius = 0.22
+height = 0.3
+
+[sub_resource type="BoxMesh" id="BoxMesh_h5ffw"]
+size = Vector3(0.22, 0.4, 0.22)
+
+[sub_resource type="BoxMesh" id="BoxMesh_5iljq"]
+size = Vector3(0.8, 0.1, 0.5)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_xaprj"]
+top_radius = 0.09
+bottom_radius = 0.05
+height = 0.12
+
+[sub_resource type="BoxMesh" id="BoxMesh_nb4f5"]
+size = Vector3(1.2, 0.05, 0.8)
+
+[sub_resource type="BoxMesh" id="BoxMesh_tsdvb"]
+size = Vector3(1.8, 1, 2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_keyo3"]
+size = Vector3(1.8, 1, 2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_vnvhg"]
+size = Vector3(1.2, 1.2, 0.6)
+
+[sub_resource type="BoxMesh" id="BoxMesh_k8rwe"]
+size = Vector3(1, 0.65, 0.08)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_y1mhp"]
+size = Vector3(1.2, 1.2, 0.6)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_br4io"]
+size = Vector3(1, 0.65, 0.08)
+
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_fjy48"]
+panorama = ExtResource("1_oq3xt")
+
+[sub_resource type="Sky" id="Sky_oq3xt"]
+sky_material = SubResource("PanoramaSkyMaterial_fjy48")
+
+[sub_resource type="Environment" id="Environment_xaprj"]
+background_mode = 2
+background_color = Color(0.39607844, 0.8039216, 1, 0.13333334)
+background_energy_multiplier = 0.5
+sky = SubResource("Sky_oq3xt")
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_qjjrk"]
+radius = 0.35
+height = 1.8
+
+[node name="Factory" type="Node3D" unique_id=1626147915]
+
+[node name="Floor" type="MeshInstance3D" parent="." unique_id=808266017]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
+mesh = SubResource("BoxMesh_fjy48")
+
+[node name="FloorBody" type="StaticBody3D" parent="Floor" unique_id=827399880]
+
+[node name="FloorCollision" type="CollisionShape3D" parent="Floor/FloorBody" unique_id=1715374957]
+shape = SubResource("BoxShape3D_oq3xt")
+
+[node name="LaserCutter" type="MeshInstance3D" parent="." unique_id=2040931088]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1.25, -3)
+
+[node name="HeartbeatLight" type="MeshInstance3D" parent="LaserCutter" unique_id=1545097713]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.4, 1.35)
+mesh = SubResource("SphereMesh_fjy48")
+
+[node name="LaserBody" type="StaticBody3D" parent="LaserCutter" unique_id=1321645022]
+
+[node name="LaserCollision" type="CollisionShape3D" parent="LaserCutter/LaserBody" unique_id=1321422775]
+shape = SubResource("BoxShape3D_xaprj")
+
+[node name="Cutter_LaserBed2" parent="LaserCutter" unique_id=416561975 instance=ExtResource("1_br4io")]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0, -1.25, 0)
+
+[node name="Bender" type="MeshInstance3D" parent="." unique_id=1482631492]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 1.25, -3)
+
+[node name="HeartbeatLight2" type="MeshInstance3D" parent="Bender" unique_id=475802718]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.4, 1.35)
+mesh = SubResource("SphereMesh_fjy48")
+
+[node name="BenderBody" type="StaticBody3D" parent="Bender" unique_id=160471515]
+
+[node name="BenderCollision" type="CollisionShape3D" parent="Bender/BenderBody" unique_id=1951063560]
+shape = SubResource("BoxShape3D_qjjrk")
+
+[node name="Bender_PressBrake2" parent="Bender" unique_id=2095308421 instance=ExtResource("1_keyo3")]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0, -1.25, 0)
+
+[node name="WeldCell" type="MeshInstance3D" parent="." unique_id=715920968]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 1.25, -3)
+
+[node name="HeartbeatLight3" type="MeshInstance3D" parent="WeldCell" unique_id=1904935503]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.4, 1.35)
+mesh = SubResource("SphereMesh_fjy48")
+
+[node name="WeldBody" type="StaticBody3D" parent="WeldCell" unique_id=1945519332]
+
+[node name="WeldCollision" type="CollisionShape3D" parent="WeldCell/WeldBody" unique_id=2146872467]
+shape = SubResource("BoxShape3D_qjjrk")
+
+[node name="Welder_Gantry2" parent="WeldCell" unique_id=1002987549 instance=ExtResource("3_h5ffw")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.25, 0)
+
+[node name="Inspection" type="MeshInstance3D" parent="." unique_id=2097605180]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7, 1.25, -3)
+mesh = SubResource("BoxMesh_xaprj")
+
+[node name="HeartbeatLight4" type="MeshInstance3D" parent="Inspection" unique_id=1971753740]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.4, 1.35)
+mesh = SubResource("SphereMesh_fjy48")
+
+[node name="InspectionBody" type="StaticBody3D" parent="Inspection" unique_id=6677027]
+
+[node name="InspectionCollision" type="CollisionShape3D" parent="Inspection/InspectionBody" unique_id=1432208187]
+shape = SubResource("BoxShape3D_qjjrk")
+
+[node name="RobotSystem" type="Node3D" parent="." unique_id=1283865291]
+script = ExtResource("1_qjjrk")
+
+[node name="Rail" type="MeshInstance3D" parent="RobotSystem" unique_id=1475642968]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0.15, 0)
+mesh = SubResource("BoxMesh_qjjrk")
+
+[node name="Carriage" type="MeshInstance3D" parent="RobotSystem" unique_id=198854380]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 0.4, 0)
+mesh = SubResource("BoxMesh_keyo3")
+
+[node name="RobotBase" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=788146729]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.4, 0)
+mesh = SubResource("CylinderMesh_fjy48")
+
+[node name="BasePivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase" unique_id=902397189]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.3, 0)
+
+[node name="ShoulderPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot" unique_id=146237934]
+
+[node name="LowerArm" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1790794962]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+mesh = SubResource("BoxMesh_y1mhp")
+
+[node name="ElbowPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1559764716]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.8, 0)
+
+[node name="UpperArm" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=96010901]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.7, 0)
+mesh = SubResource("BoxMesh_br4io")
+
+[node name="WristRollPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=664019285]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.4, 0)
+
+[node name="WristHousing" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot" unique_id=1452627223]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.15, 0)
+mesh = SubResource("CylinderMesh_oq3xt")
+
+[node name="WristPitchPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot" unique_id=988670743]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.3, 0)
+
+[node name="WristLink" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=782823059]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.2, 0)
+mesh = SubResource("BoxMesh_h5ffw")
+
+[node name="ToolRotationPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=2000052952]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.4, 0)
+
+[node name="GripperPlate" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot" unique_id=82362475]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.05, 0)
+mesh = SubResource("BoxMesh_5iljq")
+
+[node name="SuctionCups" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate" unique_id=399015574]
+
+[node name="CupFrontLeft" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups" unique_id=2087609727]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.25, 0.11, -0.15)
+mesh = SubResource("CylinderMesh_xaprj")
+
+[node name="CupFrontRight" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups" unique_id=23503689]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.25, 0.11, -0.15)
+mesh = SubResource("CylinderMesh_xaprj")
+
+[node name="CupBackLeft" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups" unique_id=1662899821]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.25, 0.11, 0.15)
+mesh = SubResource("CylinderMesh_xaprj")
+
+[node name="CupBackRight" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups" unique_id=1460399479]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.25, 0.11, 0.15)
+mesh = SubResource("CylinderMesh_xaprj")
+
+[node name="PickupPoint" type="Marker3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate" unique_id=1128918029]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.195, 0)
+
+[node name="WorkPieces" type="Node3D" parent="." unique_id=911472083]
+
+[node name="Part01" type="Node3D" parent="WorkPieces" unique_id=1807876620]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 2.525, -3)
+
+[node name="PartMesh" type="MeshInstance3D" parent="WorkPieces/Part01" unique_id=1579539128]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.4341416, 0.32046962)
+mesh = SubResource("BoxMesh_nb4f5")
+
+[node name="ProcessTargets" type="Node3D" parent="." unique_id=791537972]
+
+[node name="LaserTarget" type="Marker3D" parent="ProcessTargets" unique_id=665142539]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 2.525, -3)
+
+[node name="BenderTarget" type="Marker3D" parent="ProcessTargets" unique_id=623372664]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 2.525, -3)
+
+[node name="WeldTarget" type="Marker3D" parent="ProcessTargets" unique_id=698792914]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 2.525, -3)
+
+[node name="InspectionTarget" type="Marker3D" parent="ProcessTargets" unique_id=1896907041]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7, 2.525, -3)
+
+[node name="OutputTarget" type="Marker3D" parent="ProcessTargets" unique_id=286428321]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 1.025, -3)
+
+[node name="OutputTable" type="MeshInstance3D" parent="." unique_id=1269974759]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 0.5, -3)
+mesh = SubResource("BoxMesh_tsdvb")
+
+[node name="OutputBody" type="StaticBody3D" parent="OutputTable" unique_id=1609746730]
+
+[node name="Outputcollision" type="CollisionShape3D" parent="OutputTable/OutputBody" unique_id=1401972268]
+shape = SubResource("BoxShape3D_keyo3")
+
+[node name="HMIConsole" type="Node3D" parent="." unique_id=2100746098]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 4.5)
+
+[node name="ConsoleStand" type="MeshInstance3D" parent="HMIConsole" unique_id=1785351684]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
+mesh = SubResource("BoxMesh_vnvhg")
+
+[node name="ScreenPanel" type="MeshInstance3D" parent="HMIConsole" unique_id=452751212]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.25, 0.34)
+mesh = SubResource("BoxMesh_k8rwe")
+
+[node name="HMIStaticBody" type="StaticBody3D" parent="HMIConsole" unique_id=375410627 groups=["hmi_console"]]
+
+[node name="StandCollision" type="CollisionShape3D" parent="HMIConsole/HMIStaticBody" unique_id=1807292412]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
+shape = SubResource("BoxShape3D_y1mhp")
+
+[node name="ScreenCollision" type="CollisionShape3D" parent="HMIConsole/HMIStaticBody" unique_id=106359554]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.25, 0.34)
+shape = SubResource("BoxShape3D_br4io")
+
+[node name="FactoryLight" type="DirectionalLight3D" parent="." unique_id=1392512740]
+transform = Transform3D(0.8660254, 0.40957603, -0.28678823, 0, 0.57357645, 0.81915206, 0.5, -0.7094065, 0.49673176, 0, 0, 0)
+shadow_enabled = true
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=555617718]
+environment = SubResource("Environment_xaprj")
+
+[node name="Player" type="CharacterBody3D" parent="." unique_id=1731048989]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.1, 6)
+script = ExtResource("2_xaprj")
+
+[node name="PlayerCollision" type="CollisionShape3D" parent="Player" unique_id=1324402168]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+shape = SubResource("CapsuleShape3D_qjjrk")
+
+[node name="Head" type="Node3D" parent="Player" unique_id=225673611]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
+
+[node name="Camera3D" type="Camera3D" parent="Player/Head" unique_id=410897771]
+current = true
+fov = 85.0
+
+[node name="InteractionRay" type="RayCast3D" parent="Player/Head/Camera3D" unique_id=559925569]
+target_position = Vector3(0, 0, -3)

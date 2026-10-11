@@ -1,0 +1,725 @@
+[gd_scene format=3 uid="uid://bcursbep1j2cp"]
+
+[ext_resource type="PackedScene" uid="uid://bjoefar384f5w" path="res://assets/machines/Cutter_LaserBed.glb" id="1_br4io"]
+[ext_resource type="PackedScene" uid="uid://dqhwote23yjqr" path="res://assets/machines/Bender_PressBrake.glb" id="1_keyo3"]
+[ext_resource type="Texture2D" uid="uid://c3ss5gldsbnw8" path="res://kloofendal_48d_partly_cloudy_puresky_4k.exr" id="1_oq3xt"]
+[ext_resource type="Script" uid="uid://bqjf26qgfxpbq" path="res://player.gd" id="2_xaprj"]
+[ext_resource type="PackedScene" uid="uid://fnyd3trp03g6" path="res://assets/machines/Welder_Gantry.glb" id="3_h5ffw"]
+[ext_resource type="PackedScene" uid="uid://68knahmw2cok" path="res://assets/machines/RobotArm_6DOF.glb" id="4_j6mxp"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_fjy48"]
+size = Vector3(24, 0.2, 14)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_oq3xt"]
+size = Vector3(24, 0.2, 14)
+
+[sub_resource type="SphereMesh" id="SphereMesh_fjy48"]
+radius = 0.15
+height = 0.3
+
+[sub_resource type="BoxShape3D" id="Shape_AlignedLaser"]
+size = Vector3(3.5, 1.05, 2.85)
+
+[sub_resource type="BoxShape3D" id="Shape_AlignedBender"]
+size = Vector3(3.25, 2.9, 1.36)
+
+[sub_resource type="StandardMaterial3D" id="Mat_LoadingSteel"]
+albedo_color = Color(0.28, 0.32, 0.36, 1)
+metallic = 0.65
+roughness = 0.5
+
+[sub_resource type="BoxMesh" id="Mesh_BenderLoadingTable"]
+material = SubResource("Mat_LoadingSteel")
+size = Vector3(1.5, 0.025, 0.85)
+
+[sub_resource type="BoxShape3D" id="Shape_AlignedWeld"]
+size = Vector3(2.6, 1.02, 1.55)
+
+[sub_resource type="BoxShape3D" id="Shape_AlignedInspection"]
+size = Vector3(3.2, 1.04, 2.6)
+
+[sub_resource type="BoxMesh" id="Mesh_InspectionTop"]
+material = SubResource("Mat_LoadingSteel")
+size = Vector3(3.2, 0.08, 2.6)
+
+[sub_resource type="StandardMaterial3D" id="Mat_InspectionDark"]
+albedo_color = Color(0.06, 0.07, 0.08, 1)
+roughness = 0.6
+
+[sub_resource type="BoxMesh" id="Mesh_InspectionLeg"]
+material = SubResource("Mat_InspectionDark")
+size = Vector3(0.16, 0.96, 0.16)
+
+[sub_resource type="GDScript" id="GDScript_AlignedRobot"]
+script/source = "extends Node3D
+
+signal status_changed(message: String)
+
+
+
+
+# Robot joint poses. Angles are in degrees.
+const POSE_HOME: Dictionary = {
+	\"base_y\": 0.0,
+	\"shoulder_z\": 0.0,
+	\"elbow_z\": 0.0,
+	\"wrist_roll_y\": 0.0,
+	\"wrist_pitch_z\": 0.0,
+	\"tool_rotation_y\": 0.0
+}
+
+const POSE_CARRY: Dictionary = {
+	\"base_y\": 90.0,
+	\"shoulder_z\": -15.0,
+	\"elbow_z\": -30.0,
+	\"wrist_roll_y\": 0.0,
+	\"wrist_pitch_z\": -135.0,
+	\"tool_rotation_y\": 0.0
+}
+
+
+
+# Motion and presentation settings.
+@export var rail_speed: float = 2.5
+@export var joint_move_duration: float = 1.5
+@export var suction_pause: float = 0.4
+@export var heartbeat_flashes: int = 4
+@export var heartbeat_interval: float = 0.25
+@export var part_attach_offset_y: float = 0.025
+@export var approach_clearance: float = 0.25
+
+# These switches represent the routing choices made by the CODESYS logic.
+@export var part_id: int = 1
+@export var use_bender: bool = true
+@export var use_welder: bool = true
+@export var use_inspection: bool = true
+
+
+# Robot hierarchy.
+@onready var carriage: Node3D = $Carriage
+@onready var base_pivot: Node3D = $Carriage/RobotBase/BasePivot
+@onready var shoulder_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot
+@onready var elbow_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot
+@onready var wrist_roll_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot
+@onready var wrist_pitch_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot
+@onready var tool_rotation_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot
+@onready var pickup_point: Marker3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/PickupPoint
+
+# Workpiece and process targets.
+@onready var workpieces: Node3D = $\"../WorkPieces\"
+@onready var part: Node3D = $\"../WorkPieces/Part01\"
+@onready var laser_target: Marker3D = $\"../ProcessTargets/LaserTarget\"
+@onready var bender_target: Marker3D = $\"../ProcessTargets/BenderTarget\"
+@onready var weld_target: Marker3D = $\"../ProcessTargets/WeldTarget\"
+@onready var inspection_target: Marker3D = $\"../ProcessTargets/InspectionTarget\"
+@onready var output_target: Marker3D = $\"../ProcessTargets/OutputTarget\"
+
+# Existing station heartbeat meshes.
+@onready var laser_light: Node3D = $\"../LaserCutter/HeartbeatLight\"
+@onready var bender_light: Node3D = $\"../Bender/HeartbeatLight2\"
+@onready var weld_light: Node3D = $\"../WeldCell/HeartbeatLight3\"
+@onready var inspection_light: Node3D = $\"../Inspection/HeartbeatLight4\"
+
+
+var animation_running: bool = false
+
+
+func _ready() -> void:
+	reset_demo_state()
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed(\"run_demo\") and not animation_running:
+		run_factory_demo()
+
+
+# Complete Cutter -> Bender -> Welder -> Inspection -> Output demonstration.
+func run_factory_demo() -> void:
+	animation_running = true
+	reset_demo_state()
+
+	await wait_seconds(0.5)
+
+	set_status(\"Part %d: laser cutting\" % part_id)
+	await run_station_process(\"Laser cutter\", laser_light)
+	if not (await pick_current_part()):
+		abort_demo()
+		return
+
+	if use_bender:
+		if not (await visit_station(bender_target, bender_light, \"Bender\")):
+			abort_demo()
+			return
+
+	if use_welder:
+		if not (await visit_station(weld_target, weld_light, \"Welder\")):
+			abort_demo()
+			return
+
+	if use_inspection:
+		if not (await visit_station(inspection_target, inspection_light, \"Inspection\")):
+			abort_demo()
+			return
+
+	set_status(\"Moving part %d to output\" % part_id)
+	await move_carriage_to(to_local(output_target.global_position).x)
+	if not (await place_part_at(output_target)):
+		abort_demo()
+		return
+	await move_to_pose(POSE_HOME)
+
+	set_all_lights(false)
+	set_status(\"Part %d complete\" % part_id)
+	animation_running = false
+
+
+# Visits one optional processing station and collects the part again afterward.
+func visit_station(
+	target: Marker3D,
+	heartbeat_light: Node3D,
+	station_name: String
+) -> bool:
+	set_status(\"Moving part %d to %s\" % [part_id, station_name])
+	await move_carriage_to(to_local(target.global_position).x)
+	if not (await place_part_at(target)):
+		return false
+	await run_station_process(station_name, heartbeat_light)
+	return await pick_current_part()
+
+
+# Solve each pickup from the current part/marker, using this arm's actual link lengths.
+func pose_for_position(world_position: Vector3) -> Dictionary:
+	var local_position: Vector3 = carriage.to_local(world_position)
+	var shoulder_origin: Vector3 = carriage.to_local(shoulder_pivot.global_position)
+	var delta: Vector3 = local_position - shoulder_origin
+	var reach: float = Vector2(delta.x, delta.z).length()
+	var lower_length: float = elbow_pivot.position.y
+	var upper_length: float = wrist_roll_pivot.position.y + wrist_pitch_pivot.position.y
+	var tool_drop: float = tool_rotation_pivot.position.y + (pickup_point.get_parent() as Node3D).position.y
+	tool_drop += pickup_point.position.y + part_attach_offset_y
+	var wrist_height: float = delta.y + tool_drop
+	var distance: float = Vector2(reach, wrist_height).length()
+	if distance > lower_length + upper_length or distance < absf(lower_length - upper_length):
+		push_error(\"Target is outside the robot workspace: %s\" % world_position)
+		return {}
+	var elbow_cos: float = (distance * distance - lower_length * lower_length - upper_length * upper_length)
+	elbow_cos /= 2.0 * lower_length * upper_length
+	var elbow_angle: float = -acos(clampf(elbow_cos, -1.0, 1.0))
+	var shoulder_angle: float = atan2(wrist_height, reach)
+	shoulder_angle -= atan2(upper_length * sin(elbow_angle), lower_length + upper_length * cos(elbow_angle))
+	shoulder_angle -= PI / 2.0
+	return {
+		\"base_y\": rad_to_deg(atan2(-delta.z, delta.x)),
+		\"shoulder_z\": rad_to_deg(shoulder_angle),
+		\"elbow_z\": rad_to_deg(elbow_angle),
+		\"wrist_roll_y\": 0.0,
+		\"wrist_pitch_z\": -180.0 - rad_to_deg(shoulder_angle + elbow_angle),
+		\"tool_rotation_y\": 0.0
+	}
+
+
+func pick_current_part() -> bool:
+	set_status(\"Robot collecting part %d\" % part_id)
+	var position_to_pick: Vector3 = part.global_position
+	var approach_pose: Dictionary = pose_for_position(position_to_pick + Vector3.UP * approach_clearance)
+	var contact_pose: Dictionary = pose_for_position(position_to_pick)
+	if approach_pose.is_empty() or contact_pose.is_empty():
+		set_status(\"Target is outside the robot workspace\")
+		return false
+	await move_to_pose(approach_pose)
+	await move_to_pose(contact_pose, joint_move_duration * 0.5)
+	await wait_seconds(suction_pause)
+	attach_part_to_tool()
+	await wait_seconds(suction_pause)
+	await move_to_pose(approach_pose, joint_move_duration * 0.5)
+	await move_to_pose(POSE_CARRY)
+	return true
+
+
+func place_part_at(target: Marker3D) -> bool:
+	set_status(\"Robot placing part %d\" % part_id)
+	var approach_pose: Dictionary = pose_for_position(target.global_position + Vector3.UP * approach_clearance)
+	var contact_pose: Dictionary = pose_for_position(target.global_position)
+	if approach_pose.is_empty() or contact_pose.is_empty():
+		set_status(\"Target is outside the robot workspace\")
+		return false
+	await move_to_pose(approach_pose)
+	await move_to_pose(contact_pose, joint_move_duration * 0.5)
+	await wait_seconds(suction_pause)
+	release_part_at(target)
+	await wait_seconds(suction_pause)
+	await move_to_pose(approach_pose, joint_move_duration * 0.5)
+	await move_to_pose(POSE_CARRY)
+	return true
+
+
+# Reparenting makes the workpiece follow the moving tool.
+func attach_part_to_tool() -> void:
+	if part.get_parent() != pickup_point:
+		part.reparent(pickup_point, true)
+
+
+
+# The target marker provides the exact staged placement at each machine.
+func release_part_at(target: Marker3D) -> void:
+	if part.get_parent() != workpieces:
+		part.reparent(workpieces, false)
+
+	part.global_transform = target.global_transform
+
+
+func move_carriage_to(target_x: float) -> void:
+	if is_equal_approx(carriage.position.x, target_x):
+		return
+
+	var safe_speed: float = maxf(rail_speed, 0.01)
+	var distance: float = absf(carriage.position.x - target_x)
+	var duration: float = distance / safe_speed
+	var tween: Tween = create_tween()
+
+	tween.set_trans(Tween.TRANS_SINE)
+	tween.set_ease(Tween.EASE_IN_OUT)
+	tween.tween_property(carriage, \"position:x\", target_x, duration)
+
+	await tween.finished
+
+
+func move_to_pose(pose: Dictionary, duration: float = -1.0) -> void:
+	var actual_duration: float = duration
+	if actual_duration < 0.0:
+		actual_duration = joint_move_duration
+
+	await move_robot_to(
+		float(pose[\"base_y\"]),
+		float(pose[\"shoulder_z\"]),
+		float(pose[\"elbow_z\"]),
+		float(pose[\"wrist_roll_y\"]),
+		float(pose[\"wrist_pitch_z\"]),
+		float(pose[\"tool_rotation_y\"]),
+		actual_duration
+	)
+
+
+func move_robot_to(
+	base_y: float,
+	shoulder_z: float,
+	elbow_z: float,
+	wrist_roll_y: float,
+	wrist_pitch_z: float,
+	tool_rotation_y: float,
+	duration: float
+) -> void:
+	var tween: Tween = create_tween()
+
+	tween.set_parallel(true)
+	tween.set_trans(Tween.TRANS_SINE)
+	tween.set_ease(Tween.EASE_IN_OUT)
+
+	tween.tween_property(base_pivot, \"rotation_degrees:y\", base_y, duration)
+	tween.tween_property(shoulder_pivot, \"rotation_degrees:z\", shoulder_z, duration)
+	tween.tween_property(elbow_pivot, \"rotation_degrees:z\", elbow_z, duration)
+	tween.tween_property(wrist_roll_pivot, \"rotation_degrees:y\", wrist_roll_y, duration)
+	tween.tween_property(wrist_pitch_pivot, \"rotation_degrees:z\", wrist_pitch_z, duration)
+	tween.tween_property(tool_rotation_pivot, \"rotation_degrees:y\", tool_rotation_y, duration)
+
+	await tween.finished
+
+
+# Blinks the existing heartbeat mesh while a station is processing the part.
+func run_station_process(station_name: String, heartbeat_light: Node3D) -> void:
+	set_status(\"%s processing part %d\" % [station_name, part_id])
+
+	for _flash_index in range(heartbeat_flashes):
+		heartbeat_light.visible = true
+		await wait_seconds(heartbeat_interval)
+		heartbeat_light.visible = false
+		await wait_seconds(heartbeat_interval)
+
+
+func reset_demo_state() -> void:
+	if part.get_parent() != workpieces:
+		part.reparent(workpieces, false)
+
+	part.global_transform = laser_target.global_transform
+	carriage.position.x = to_local(laser_target.global_position).x
+	apply_pose_immediately(POSE_HOME)
+	set_all_lights(false)
+	set_status(\"Part %d ready at laser cutter\" % part_id)
+
+
+func apply_pose_immediately(pose: Dictionary) -> void:
+	base_pivot.rotation_degrees = Vector3(
+		0.0,
+		float(pose[\"base_y\"]),
+		0.0
+	)
+	shoulder_pivot.rotation_degrees = Vector3(
+		0.0,
+		0.0,
+		float(pose[\"shoulder_z\"])
+	)
+	elbow_pivot.rotation_degrees = Vector3(
+		0.0,
+		0.0,
+		float(pose[\"elbow_z\"])
+	)
+	wrist_roll_pivot.rotation_degrees = Vector3(
+		0.0,
+		float(pose[\"wrist_roll_y\"]),
+		0.0
+	)
+	wrist_pitch_pivot.rotation_degrees = Vector3(
+		0.0,
+		0.0,
+		float(pose[\"wrist_pitch_z\"])
+	)
+	tool_rotation_pivot.rotation_degrees = Vector3(
+		0.0,
+		float(pose[\"tool_rotation_y\"]),
+		0.0
+	)
+
+
+func set_all_lights(is_visible: bool) -> void:
+	laser_light.visible = is_visible
+	bender_light.visible = is_visible
+	weld_light.visible = is_visible
+	inspection_light.visible = is_visible
+
+
+func set_status(message: String) -> void:
+	print(message)
+	status_changed.emit(message)
+
+
+func wait_seconds(seconds: float) -> void:
+	await get_tree().create_timer(seconds).timeout
+
+
+func abort_demo() -> void:
+	set_all_lights(false)
+	animation_running = false
+	set_status(\"Demo stopped: unreachable pickup or placement target\")
+"
+
+[sub_resource type="BoxMesh" id="BoxMesh_qjjrk"]
+size = Vector3(23, 0.3, 0.6)
+
+[sub_resource type="BoxMesh" id="BoxMesh_keyo3"]
+size = Vector3(1.4, 0.2, 1.2)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_fjy48"]
+top_radius = 0.55
+bottom_radius = 0.55
+height = 0.6
+
+[sub_resource type="BoxMesh" id="BoxMesh_y1mhp"]
+size = Vector3(0.35, 1.8, 0.35)
+
+[sub_resource type="BoxMesh" id="BoxMesh_br4io"]
+size = Vector3(0.3, 1.4, 0.3)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_oq3xt"]
+top_radius = 0.22
+bottom_radius = 0.22
+height = 0.3
+
+[sub_resource type="BoxMesh" id="BoxMesh_h5ffw"]
+size = Vector3(0.22, 0.4, 0.22)
+
+[sub_resource type="BoxMesh" id="BoxMesh_5iljq"]
+size = Vector3(0.8, 0.1, 0.5)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_xaprj"]
+top_radius = 0.09
+bottom_radius = 0.05
+height = 0.12
+
+[sub_resource type="BoxMesh" id="BoxMesh_nb4f5"]
+size = Vector3(1.2, 0.05, 0.8)
+
+[sub_resource type="BoxMesh" id="BoxMesh_tsdvb"]
+size = Vector3(1.8, 1, 2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_keyo3"]
+size = Vector3(1.8, 1, 2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_vnvhg"]
+size = Vector3(1.2, 1.2, 0.6)
+
+[sub_resource type="BoxMesh" id="BoxMesh_k8rwe"]
+size = Vector3(1, 0.65, 0.08)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_y1mhp"]
+size = Vector3(1.2, 1.2, 0.6)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_br4io"]
+size = Vector3(1, 0.65, 0.08)
+
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_fjy48"]
+panorama = ExtResource("1_oq3xt")
+
+[sub_resource type="Sky" id="Sky_oq3xt"]
+sky_material = SubResource("PanoramaSkyMaterial_fjy48")
+
+[sub_resource type="Environment" id="Environment_xaprj"]
+background_mode = 2
+background_color = Color(0.39607844, 0.8039216, 1, 0.13333334)
+background_energy_multiplier = 0.5
+sky = SubResource("Sky_oq3xt")
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_qjjrk"]
+radius = 0.35
+height = 1.8
+
+[node name="Factory" type="Node3D" unique_id=1626147915]
+
+[node name="Floor" type="MeshInstance3D" parent="." unique_id=808266017]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
+mesh = SubResource("BoxMesh_fjy48")
+
+[node name="FloorBody" type="StaticBody3D" parent="Floor" unique_id=827399880]
+
+[node name="FloorCollision" type="CollisionShape3D" parent="Floor/FloorBody" unique_id=1715374957]
+shape = SubResource("BoxShape3D_oq3xt")
+
+[node name="LaserCutter" type="MeshInstance3D" parent="." unique_id=2040931088]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1.25, -3)
+
+[node name="HeartbeatLight" type="MeshInstance3D" parent="LaserCutter" unique_id=1545097713]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.43, 0.03, 1.15)
+mesh = SubResource("SphereMesh_fjy48")
+
+[node name="LaserBody" type="StaticBody3D" parent="LaserCutter" unique_id=1321645022]
+
+[node name="LaserCollision" type="CollisionShape3D" parent="LaserCutter/LaserBody" unique_id=1321422775]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.725, 0)
+shape = SubResource("Shape_AlignedLaser")
+
+[node name="Cutter_LaserBed2" parent="LaserCutter" unique_id=416561975 instance=ExtResource("1_br4io")]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0, -1.25, 0)
+
+[node name="Bender" type="MeshInstance3D" parent="." unique_id=1482631492]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 1.25, -3)
+
+[node name="HeartbeatLight2" type="MeshInstance3D" parent="Bender" unique_id=475802718]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.35, 1.4, 0.35)
+mesh = SubResource("SphereMesh_fjy48")
+
+[node name="BenderBody" type="StaticBody3D" parent="Bender" unique_id=160471515]
+
+[node name="BenderCollision" type="CollisionShape3D" parent="Bender/BenderBody" unique_id=1951063560]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.2, 0)
+shape = SubResource("Shape_AlignedBender")
+
+[node name="Bender_PressBrake2" parent="Bender" unique_id=2095308421 instance=ExtResource("1_keyo3")]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0, -1.25, 0)
+
+[node name="LoadingTable" type="MeshInstance3D" parent="Bender" unique_id=299464952]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.17, 1.06)
+mesh = SubResource("Mesh_BenderLoadingTable")
+
+[node name="WeldCell" type="MeshInstance3D" parent="." unique_id=715920968]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 1.25, -3)
+
+[node name="HeartbeatLight3" type="MeshInstance3D" parent="WeldCell" unique_id=1904935503]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.15, -0.02, 0.63)
+mesh = SubResource("SphereMesh_fjy48")
+
+[node name="WeldBody" type="StaticBody3D" parent="WeldCell" unique_id=1945519332]
+
+[node name="WeldCollision" type="CollisionShape3D" parent="WeldCell/WeldBody" unique_id=2146872467]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.74, 0)
+shape = SubResource("Shape_AlignedWeld")
+
+[node name="Welder_Gantry2" parent="WeldCell" unique_id=1002987549 instance=ExtResource("3_h5ffw")]
+transform = Transform3D(-1, 0, 0, 0, 1, 0, 0, 0, -1, 0, -1.25, 0)
+
+[node name="Inspection" type="MeshInstance3D" parent="." unique_id=2097605180]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7, 1.25, -3)
+
+[node name="HeartbeatLight4" type="MeshInstance3D" parent="Inspection" unique_id=1971753740]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.35, -0.03, 0.95)
+mesh = SubResource("SphereMesh_fjy48")
+
+[node name="InspectionBody" type="StaticBody3D" parent="Inspection" unique_id=6677027]
+
+[node name="InspectionCollision" type="CollisionShape3D" parent="Inspection/InspectionBody" unique_id=1432208187]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.73, 0)
+shape = SubResource("Shape_AlignedInspection")
+
+[node name="InspectionTableTop" type="MeshInstance3D" parent="Inspection" unique_id=250314586]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.25, 0)
+mesh = SubResource("Mesh_InspectionTop")
+
+[node name="InspectionLeg0" type="MeshInstance3D" parent="Inspection" unique_id=2106602654]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.38, -0.77, -1.08)
+mesh = SubResource("Mesh_InspectionLeg")
+
+[node name="InspectionLeg1" type="MeshInstance3D" parent="Inspection" unique_id=1279641753]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.38, -0.77, 1.08)
+mesh = SubResource("Mesh_InspectionLeg")
+
+[node name="InspectionLeg2" type="MeshInstance3D" parent="Inspection" unique_id=1768412455]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.38, -0.77, -1.08)
+mesh = SubResource("Mesh_InspectionLeg")
+
+[node name="InspectionLeg3" type="MeshInstance3D" parent="Inspection" unique_id=330484509]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.38, -0.77, 1.08)
+mesh = SubResource("Mesh_InspectionLeg")
+
+[node name="RobotSystem" type="Node3D" parent="." unique_id=1283865291]
+script = SubResource("GDScript_AlignedRobot")
+
+[node name="Rail" type="MeshInstance3D" parent="RobotSystem" unique_id=1475642968]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0.15, 0)
+mesh = SubResource("BoxMesh_qjjrk")
+
+[node name="Carriage" type="MeshInstance3D" parent="RobotSystem" unique_id=198854380]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 0.4, 0)
+mesh = SubResource("BoxMesh_keyo3")
+
+[node name="RobotBase" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=788146729]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.4, 0)
+mesh = SubResource("CylinderMesh_fjy48")
+
+[node name="BasePivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase" unique_id=902397189]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.3, 0)
+
+[node name="ShoulderPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot" unique_id=146237934]
+
+[node name="LowerArm" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1790794962]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+mesh = SubResource("BoxMesh_y1mhp")
+
+[node name="ElbowPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1559764716]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.8, 0)
+
+[node name="UpperArm" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=96010901]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.7, 0)
+mesh = SubResource("BoxMesh_br4io")
+
+[node name="WristRollPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=664019285]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.4, 0)
+
+[node name="WristHousing" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot" unique_id=1452627223]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.15, 0)
+mesh = SubResource("CylinderMesh_oq3xt")
+
+[node name="WristPitchPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot" unique_id=988670743]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.3, 0)
+
+[node name="WristLink" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=782823059]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.2, 0)
+mesh = SubResource("BoxMesh_h5ffw")
+
+[node name="ToolRotationPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=2000052952]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.4, 0)
+
+[node name="GripperPlate" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot" unique_id=82362475]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.05, 0)
+mesh = SubResource("BoxMesh_5iljq")
+
+[node name="SuctionCups" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate" unique_id=399015574]
+
+[node name="CupFrontLeft" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups" unique_id=2087609727]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.25, 0.11, -0.15)
+mesh = SubResource("CylinderMesh_xaprj")
+
+[node name="CupFrontRight" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups" unique_id=23503689]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.25, 0.11, -0.15)
+mesh = SubResource("CylinderMesh_xaprj")
+
+[node name="CupBackLeft" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups" unique_id=1662899821]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.25, 0.11, 0.15)
+mesh = SubResource("CylinderMesh_xaprj")
+
+[node name="CupBackRight" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups" unique_id=1460399479]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.25, 0.11, 0.15)
+mesh = SubResource("CylinderMesh_xaprj")
+
+[node name="PickupPoint" type="Marker3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate" unique_id=1128918029]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.195, 0)
+
+[node name="RobotArm_6DOF2" parent="RobotSystem/Carriage/RobotBase" unique_id=802146932 instance=ExtResource("4_j6mxp")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.614852, -1.1271183, 1.1644499)
+
+[node name="WorkPieces" type="Node3D" parent="." unique_id=911472083]
+
+[node name="Part01" type="Node3D" parent="WorkPieces" unique_id=1807876620]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1.075, -2.72)
+
+[node name="PartMesh" type="MeshInstance3D" parent="WorkPieces/Part01" unique_id=1579539128]
+mesh = SubResource("BoxMesh_nb4f5")
+
+[node name="ProcessTargets" type="Node3D" parent="." unique_id=791537972]
+
+[node name="LaserTarget" type="Marker3D" parent="ProcessTargets" unique_id=665142539]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1.075, -2.72)
+
+[node name="BenderTarget" type="Marker3D" parent="ProcessTargets" unique_id=623372664]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 1.1175, -1.94)
+
+[node name="WeldTarget" type="Marker3D" parent="ProcessTargets" unique_id=698792914]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 1.045, -2.68)
+
+[node name="InspectionTarget" type="Marker3D" parent="ProcessTargets" unique_id=1896907041]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7, 1.065, -3)
+
+[node name="OutputTarget" type="Marker3D" parent="ProcessTargets" unique_id=286428321]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 1.025, -3)
+
+[node name="OutputTable" type="MeshInstance3D" parent="." unique_id=1269974759]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 0.5, -3)
+mesh = SubResource("BoxMesh_tsdvb")
+
+[node name="OutputBody" type="StaticBody3D" parent="OutputTable" unique_id=1609746730]
+
+[node name="Outputcollision" type="CollisionShape3D" parent="OutputTable/OutputBody" unique_id=1401972268]
+shape = SubResource("BoxShape3D_keyo3")
+
+[node name="HMIConsole" type="Node3D" parent="." unique_id=2100746098]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 4.5)
+
+[node name="ConsoleStand" type="MeshInstance3D" parent="HMIConsole" unique_id=1785351684]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
+mesh = SubResource("BoxMesh_vnvhg")
+
+[node name="ScreenPanel" type="MeshInstance3D" parent="HMIConsole" unique_id=452751212]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.25, 0.34)
+mesh = SubResource("BoxMesh_k8rwe")
+
+[node name="HMIStaticBody" type="StaticBody3D" parent="HMIConsole" unique_id=375410627 groups=["hmi_console"]]
+
+[node name="StandCollision" type="CollisionShape3D" parent="HMIConsole/HMIStaticBody" unique_id=1807292412]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
+shape = SubResource("BoxShape3D_y1mhp")
+
+[node name="ScreenCollision" type="CollisionShape3D" parent="HMIConsole/HMIStaticBody" unique_id=106359554]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.25, 0.34)
+shape = SubResource("BoxShape3D_br4io")
+
+[node name="FactoryLight" type="DirectionalLight3D" parent="." unique_id=1392512740]
+transform = Transform3D(0.8660254, 0.40957603, -0.28678823, 0, 0.57357645, 0.81915206, 0.5, -0.7094065, 0.49673176, 0, 0, 0)
+shadow_enabled = true
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=555617718]
+environment = SubResource("Environment_xaprj")
+
+[node name="Player" type="CharacterBody3D" parent="." unique_id=1731048989]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.1, 6)
+script = ExtResource("2_xaprj")
+
+[node name="PlayerCollision" type="CollisionShape3D" parent="Player" unique_id=1324402168]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+shape = SubResource("CapsuleShape3D_qjjrk")
+
+[node name="Head" type="Node3D" parent="Player" unique_id=225673611]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
+
+[node name="Camera3D" type="Camera3D" parent="Player/Head" unique_id=410897771]
+current = true
+fov = 85.0
+
+[node name="InteractionRay" type="RayCast3D" parent="Player/Head/Camera3D" unique_id=559925569]
+target_position = Vector3(0, 0, -3)
