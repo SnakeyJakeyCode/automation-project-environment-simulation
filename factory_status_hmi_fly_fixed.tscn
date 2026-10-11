@@ -1,0 +1,3492 @@
+[gd_scene format=3 uid="uid://ohvceihbp7n5"]
+
+[ext_resource type="PackedScene" uid="uid://bjoefar384f5w" path="res://assets/machines/Cutter_LaserBed.glb" id="1_br4io"]
+[ext_resource type="PackedScene" uid="uid://dqhwote23yjqr" path="res://assets/machines/Bender_PressBrake.glb" id="1_keyo3"]
+[ext_resource type="Texture2D" uid="uid://c3ss5gldsbnw8" path="res://kloofendal_48d_partly_cloudy_puresky_4k.exr" id="1_oq3xt"]
+[ext_resource type="Script" uid="uid://bqjf26qgfxpbq" path="res://player.gd" id="2_xaprj"]
+[ext_resource type="PackedScene" uid="uid://fnyd3trp03g6" path="res://assets/machines/Welder_Gantry.glb" id="3_h5ffw"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_fjy48"]
+size = Vector3(30, 0.2, 16)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_oq3xt"]
+size = Vector3(30, 0.2, 16)
+
+[sub_resource type="SphereMesh" id="SphereMesh_fjy48"]
+radius = 0.15
+height = 0.3
+
+[sub_resource type="BoxShape3D" id="Shape_AlignedLaser"]
+size = Vector3(3.5, 1.05, 2.85)
+
+[sub_resource type="BoxShape3D" id="Shape_AlignedBender"]
+size = Vector3(3.25, 2.9, 1.36)
+
+[sub_resource type="StandardMaterial3D" id="Mat_LoadingSteel"]
+albedo_color = Color(0.28, 0.32, 0.36, 1)
+metallic = 0.65
+roughness = 0.5
+
+[sub_resource type="BoxMesh" id="Mesh_BenderLoadingTable"]
+material = SubResource("Mat_LoadingSteel")
+size = Vector3(1.5, 0.025, 0.85)
+
+[sub_resource type="BoxShape3D" id="Shape_AlignedWeld"]
+size = Vector3(2.6, 1.02, 1.55)
+
+[sub_resource type="BoxShape3D" id="Shape_AlignedInspection"]
+size = Vector3(3.2, 1.04, 2.6)
+
+[sub_resource type="BoxMesh" id="Mesh_InspectionTop"]
+material = SubResource("Mat_LoadingSteel")
+size = Vector3(3.2, 0.08, 2.6)
+
+[sub_resource type="StandardMaterial3D" id="Mat_InspectionDark"]
+albedo_color = Color(0.06, 0.07, 0.08, 1)
+roughness = 0.6
+
+[sub_resource type="BoxMesh" id="Mesh_InspectionLeg"]
+material = SubResource("Mat_InspectionDark")
+size = Vector3(0.16, 0.96, 0.16)
+
+[sub_resource type="GDScript" id="GDScript_AlignedRobot"]
+script/source = "extends Node3D
+
+signal status_changed(message: String)
+
+
+
+
+# Robot joint poses. Angles are in degrees.
+# Folded park pose: tool down, tucked above the carriage.
+const POSE_HOME: Dictionary = {
+	\"base_y\": 90.0,
+	\"shoulder_z\": 30.0,
+	\"elbow_z\": -135.0,
+	\"wrist_roll_y\": 0.0,
+	\"wrist_pitch_z\": -75.0,
+	\"tool_rotation_y\": 0.0
+}
+
+const POSE_CARRY: Dictionary = {
+	\"base_y\": 90.0,
+	\"shoulder_z\": -15.0,
+	\"elbow_z\": -30.0,
+	\"wrist_roll_y\": 0.0,
+	\"wrist_pitch_z\": -135.0,
+	\"tool_rotation_y\": 0.0
+}
+
+
+
+# Motion and presentation settings.
+@export var rail_speed: float = 2.5
+@export var joint_move_duration: float = 1.5
+@export var suction_pause: float = 0.4
+@export var heartbeat_flashes: int = 4
+@export var heartbeat_interval: float = 0.25
+@export var part_attach_offset_y: float = 0.025
+@export var approach_clearance: float = 0.25
+
+# These switches represent the routing choices made by the CODESYS logic.
+@export var part_id: int = 1
+@export var use_bender: bool = true
+@export var use_welder: bool = true
+@export var use_inspection: bool = true
+
+
+# Robot hierarchy.
+@onready var carriage: Node3D = $Carriage
+@onready var base_pivot: Node3D = $Carriage/RobotBase/BasePivot
+@onready var shoulder_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot
+@onready var elbow_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot
+@onready var wrist_roll_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot
+@onready var wrist_pitch_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot
+@onready var tool_rotation_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot
+@onready var pickup_point: Marker3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/PickupPoint
+
+# Workpiece and process targets.
+@onready var workpieces: Node3D = $\"../WorkPieces\"
+@onready var part: Node3D = $\"../WorkPieces/Part01\"
+@onready var laser_target: Marker3D = $\"../ProcessTargets/LaserTarget\"
+@onready var bender_target: Marker3D = $\"../ProcessTargets/BenderTarget\"
+@onready var weld_target: Marker3D = $\"../ProcessTargets/WeldTarget\"
+@onready var inspection_target: Marker3D = $\"../ProcessTargets/InspectionTarget\"
+@onready var output_target: Marker3D = $\"../ProcessTargets/OutputTarget\"
+
+# Existing station heartbeat meshes.
+@onready var laser_light: Node3D = $\"../LaserCutter/HeartbeatLight\"
+@onready var bender_light: Node3D = $\"../Bender/HeartbeatLight2\"
+@onready var weld_light: Node3D = $\"../WeldCell/HeartbeatLight3\"
+@onready var inspection_light: Node3D = $\"../Inspection/HeartbeatLight4\"
+
+
+var animation_running: bool = false
+
+
+func _ready() -> void:
+	reset_demo_state()
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed(\"run_demo\") and not animation_running:
+		run_factory_demo()
+
+
+# Complete Cutter -> Bender -> Welder -> Inspection -> Output demonstration.
+func run_factory_demo() -> void:
+	if animation_running:
+		return
+	var hmi: Node = get_node(\"../HMISystem\")
+	var connection_block: String = str(hmi.call(\"cycle_block_reason\"))
+	if not connection_block.is_empty():
+		set_status(connection_block)
+		return
+	var gate: Node = get_node(\"../CellEnclosure/AccessGate\")
+	var blocked: String = str(gate.call(\"cycle_block_reason\"))
+	if not blocked.is_empty():
+		set_status(blocked)
+		return
+	animation_running = true
+	reset_demo_state()
+
+	await wait_seconds(0.5)
+
+	set_status(\"Part %d: laser cutting\" % part_id)
+	await run_station_process(\"Laser cutter\", laser_light)
+	if not (await pick_current_part()):
+		abort_demo()
+		return
+
+	if use_bender:
+		if not (await visit_station(bender_target, bender_light, \"Bender\")):
+			abort_demo()
+			return
+
+	if use_welder:
+		if not (await visit_station(weld_target, weld_light, \"Welder\")):
+			abort_demo()
+			return
+
+	if use_inspection:
+		if not (await visit_station(inspection_target, inspection_light, \"Inspection\")):
+			abort_demo()
+			return
+
+	set_status(\"Moving part %d to output\" % part_id)
+	await move_carriage_to(to_local(output_target.global_position).x)
+	if not (await place_part_at(output_target)):
+		abort_demo()
+		return
+	await move_to_pose(POSE_HOME)
+
+	set_all_lights(false)
+	set_status(\"Part %d complete\" % part_id)
+	animation_running = false
+
+
+# Visits one optional processing station and collects the part again afterward.
+func visit_station(
+	target: Marker3D,
+	heartbeat_light: Node3D,
+	station_name: String
+) -> bool:
+	set_status(\"Moving part %d to %s\" % [part_id, station_name])
+	await move_carriage_to(to_local(target.global_position).x)
+	if not (await place_part_at(target)):
+		return false
+	await run_station_process(station_name, heartbeat_light)
+	return await pick_current_part()
+
+
+# Solve each pickup from the current part/marker, using this arm's actual link lengths.
+func pose_for_position(world_position: Vector3) -> Dictionary:
+	var local_position: Vector3 = carriage.to_local(world_position)
+	var shoulder_origin: Vector3 = carriage.to_local(shoulder_pivot.global_position)
+	var delta: Vector3 = local_position - shoulder_origin
+	var reach: float = Vector2(delta.x, delta.z).length()
+	var lower_length: float = elbow_pivot.position.y
+	var upper_length: float = wrist_roll_pivot.position.y + wrist_pitch_pivot.position.y
+	var tool_drop: float = tool_rotation_pivot.position.y + (pickup_point.get_parent() as Node3D).position.y
+	tool_drop += pickup_point.position.y + part_attach_offset_y
+	var wrist_height: float = delta.y + tool_drop
+	var distance: float = Vector2(reach, wrist_height).length()
+	if distance > lower_length + upper_length or distance < absf(lower_length - upper_length):
+		push_error(\"Target is outside the robot workspace: %s\" % world_position)
+		return {}
+	var elbow_cos: float = (distance * distance - lower_length * lower_length - upper_length * upper_length)
+	elbow_cos /= 2.0 * lower_length * upper_length
+	var elbow_angle: float = -acos(clampf(elbow_cos, -1.0, 1.0))
+	var shoulder_angle: float = atan2(wrist_height, reach)
+	shoulder_angle -= atan2(upper_length * sin(elbow_angle), lower_length + upper_length * cos(elbow_angle))
+	shoulder_angle -= PI / 2.0
+	return {
+		\"base_y\": rad_to_deg(atan2(-delta.z, delta.x)),
+		\"shoulder_z\": rad_to_deg(shoulder_angle),
+		\"elbow_z\": rad_to_deg(elbow_angle),
+		\"wrist_roll_y\": 0.0,
+		\"wrist_pitch_z\": -180.0 - rad_to_deg(shoulder_angle + elbow_angle),
+		\"tool_rotation_y\": 0.0
+	}
+
+
+func pick_current_part() -> bool:
+	set_status(\"Robot collecting part %d\" % part_id)
+	var position_to_pick: Vector3 = part.global_position
+	var approach_pose: Dictionary = pose_for_position(position_to_pick + Vector3.UP * approach_clearance)
+	var contact_pose: Dictionary = pose_for_position(position_to_pick)
+	if approach_pose.is_empty() or contact_pose.is_empty():
+		set_status(\"Target is outside the robot workspace\")
+		return false
+	await move_to_pose(approach_pose)
+	await move_to_pose(contact_pose, joint_move_duration * 0.5)
+	await wait_seconds(suction_pause)
+	attach_part_to_tool()
+	await wait_seconds(suction_pause)
+	await move_to_pose(approach_pose, joint_move_duration * 0.5)
+	await move_to_pose(POSE_CARRY)
+	return true
+
+
+func place_part_at(target: Marker3D) -> bool:
+	set_status(\"Robot placing part %d\" % part_id)
+	var approach_pose: Dictionary = pose_for_position(target.global_position + Vector3.UP * approach_clearance)
+	var contact_pose: Dictionary = pose_for_position(target.global_position)
+	if approach_pose.is_empty() or contact_pose.is_empty():
+		set_status(\"Target is outside the robot workspace\")
+		return false
+	await move_to_pose(approach_pose)
+	await move_to_pose(contact_pose, joint_move_duration * 0.5)
+	await wait_seconds(suction_pause)
+	release_part_at(target)
+	await wait_seconds(suction_pause)
+	await move_to_pose(approach_pose, joint_move_duration * 0.5)
+	await move_to_pose(POSE_CARRY)
+	return true
+
+
+# Reparenting makes the workpiece follow the moving tool.
+func attach_part_to_tool() -> void:
+	if part.get_parent() != pickup_point:
+		part.reparent(pickup_point, true)
+
+
+
+# The target marker provides the exact staged placement at each machine.
+func release_part_at(target: Marker3D) -> void:
+	if part.get_parent() != workpieces:
+		part.reparent(workpieces, false)
+
+	part.global_transform = target.global_transform
+
+
+func move_carriage_to(target_x: float) -> void:
+	if is_equal_approx(carriage.position.x, target_x):
+		return
+
+	var safe_speed: float = maxf(rail_speed, 0.01)
+	var distance: float = absf(carriage.position.x - target_x)
+	var duration: float = distance / safe_speed
+	var tween: Tween = create_tween()
+
+	tween.set_trans(Tween.TRANS_SINE)
+	tween.set_ease(Tween.EASE_IN_OUT)
+	tween.tween_property(carriage, \"position:x\", target_x, duration)
+
+	await tween.finished
+
+
+func move_to_pose(pose: Dictionary, duration: float = -1.0) -> void:
+	var actual_duration: float = duration
+	if actual_duration < 0.0:
+		actual_duration = joint_move_duration
+
+	await move_robot_to(
+		float(pose[\"base_y\"]),
+		float(pose[\"shoulder_z\"]),
+		float(pose[\"elbow_z\"]),
+		float(pose[\"wrist_roll_y\"]),
+		float(pose[\"wrist_pitch_z\"]),
+		float(pose[\"tool_rotation_y\"]),
+		actual_duration
+	)
+
+
+func move_robot_to(
+	base_y: float,
+	shoulder_z: float,
+	elbow_z: float,
+	wrist_roll_y: float,
+	wrist_pitch_z: float,
+	tool_rotation_y: float,
+	duration: float
+) -> void:
+	var tween: Tween = create_tween()
+
+	tween.set_parallel(true)
+	tween.set_trans(Tween.TRANS_SINE)
+	tween.set_ease(Tween.EASE_IN_OUT)
+
+	tween.tween_property(base_pivot, \"rotation_degrees:y\", base_y, duration)
+	tween.tween_property(shoulder_pivot, \"rotation_degrees:z\", shoulder_z, duration)
+	tween.tween_property(elbow_pivot, \"rotation_degrees:z\", elbow_z, duration)
+	tween.tween_property(wrist_roll_pivot, \"rotation_degrees:y\", wrist_roll_y, duration)
+	tween.tween_property(wrist_pitch_pivot, \"rotation_degrees:z\", wrist_pitch_z, duration)
+	tween.tween_property(tool_rotation_pivot, \"rotation_degrees:y\", tool_rotation_y, duration)
+
+	await tween.finished
+
+
+# Blinks the existing heartbeat mesh while a station is processing the part.
+func run_station_process(station_name: String, _heartbeat_light: Node3D) -> void:
+	set_status(\"%s processing part %d\" % [station_name, part_id])
+	var hmi: Node = get_node(\"../HMISystem\")
+	hmi.call(\"begin_processing\", station_name)
+	await wait_seconds(float(heartbeat_flashes) * heartbeat_interval * 2.0)
+	hmi.call(\"end_processing\", station_name)
+
+
+func reset_demo_state() -> void:
+	if part.get_parent() != workpieces:
+		part.reparent(workpieces, false)
+
+	part.global_transform = laser_target.global_transform
+	carriage.position.x = to_local(laser_target.global_position).x
+	apply_pose_immediately(POSE_HOME)
+	set_all_lights(false)
+	set_status(\"Part %d ready at laser cutter\" % part_id)
+
+
+func apply_pose_immediately(pose: Dictionary) -> void:
+	base_pivot.rotation_degrees = Vector3(
+		0.0,
+		float(pose[\"base_y\"]),
+		0.0
+	)
+	shoulder_pivot.rotation_degrees = Vector3(
+		0.0,
+		0.0,
+		float(pose[\"shoulder_z\"])
+	)
+	elbow_pivot.rotation_degrees = Vector3(
+		0.0,
+		0.0,
+		float(pose[\"elbow_z\"])
+	)
+	wrist_roll_pivot.rotation_degrees = Vector3(
+		0.0,
+		float(pose[\"wrist_roll_y\"]),
+		0.0
+	)
+	wrist_pitch_pivot.rotation_degrees = Vector3(
+		0.0,
+		0.0,
+		float(pose[\"wrist_pitch_z\"])
+	)
+	tool_rotation_pivot.rotation_degrees = Vector3(
+		0.0,
+		float(pose[\"tool_rotation_y\"]),
+		0.0
+	)
+
+
+func set_all_lights(_is_visible: bool) -> void:
+	laser_light.visible = true
+	bender_light.visible = true
+	weld_light.visible = true
+	inspection_light.visible = true
+
+
+func set_status(message: String) -> void:
+	print(message)
+	status_changed.emit(message)
+
+
+func wait_seconds(seconds: float) -> void:
+	await get_tree().create_timer(seconds).timeout
+
+
+func abort_demo() -> void:
+	set_all_lights(false)
+	animation_running = false
+	set_status(\"Demo stopped: unreachable pickup or placement target\")
+"
+
+[sub_resource type="StandardMaterial3D" id="RailMat_Track"]
+albedo_color = Color(0.075, 0.09, 0.11, 1)
+metallic = 0.15
+roughness = 0.72
+
+[sub_resource type="BoxMesh" id="RailMesh_0"]
+material = SubResource("RailMat_Track")
+size = Vector3(23, 0.18, 1.05)
+
+[sub_resource type="StandardMaterial3D" id="RailMat_Black"]
+albedo_color = Color(0.035, 0.045, 0.055, 1)
+metallic = 0.15
+roughness = 0.72
+
+[sub_resource type="BoxMesh" id="RailMesh_1"]
+material = SubResource("RailMat_Black")
+size = Vector3(22.55, 0.04, 0.15)
+
+[sub_resource type="StandardMaterial3D" id="RailMat_Steel"]
+albedo_color = Color(0.52, 0.58, 0.64, 1)
+metallic = 0.8
+roughness = 0.38
+
+[sub_resource type="BoxMesh" id="RailMesh_2"]
+material = SubResource("RailMat_Steel")
+size = Vector3(22.55, 0.06, 0.095)
+
+[sub_resource type="BoxMesh" id="RailMesh_3"]
+material = SubResource("RailMat_Black")
+size = Vector3(22.5, 0.035, 0.31)
+
+[sub_resource type="BoxMesh" id="RailMesh_4"]
+material = SubResource("RailMat_Track")
+
+[sub_resource type="MultiMesh" id="RailBatch_MountingFeet"]
+transform_format = 1
+instance_count = 12
+mesh = SubResource("RailMesh_4")
+buffer = PackedFloat32Array(0.38, 0, 0, -10.9, 0, 0.07, 0, -0.115, 0, 0, 1.36, 0, 0.38, 0, 0, -8.918182, 0, 0.07, 0, -0.115, 0, 0, 1.36, 0, 0.38, 0, 0, -6.936364, 0, 0.07, 0, -0.115, 0, 0, 1.36, 0, 0.38, 0, 0, -4.954545, 0, 0.07, 0, -0.115, 0, 0, 1.36, 0, 0.38, 0, 0, -2.972727, 0, 0.07, 0, -0.115, 0, 0, 1.36, 0, 0.38, 0, 0, -0.9909091, 0, 0.07, 0, -0.115, 0, 0, 1.36, 0, 0.38, 0, 0, 0.9909091, 0, 0.07, 0, -0.115, 0, 0, 1.36, 0, 0.38, 0, 0, 2.972727, 0, 0.07, 0, -0.115, 0, 0, 1.36, 0, 0.38, 0, 0, 4.954545, 0, 0.07, 0, -0.115, 0, 0, 1.36, 0, 0.38, 0, 0, 6.936364, 0, 0.07, 0, -0.115, 0, 0, 1.36, 0, 0.38, 0, 0, 8.918182, 0, 0.07, 0, -0.115, 0, 0, 1.36, 0, 0.38, 0, 0, 10.9, 0, 0.07, 0, -0.115, 0, 0, 1.36, 0)
+
+[sub_resource type="StandardMaterial3D" id="RailMat_Bolt"]
+albedo_color = Color(0.3, 0.34, 0.38, 1)
+metallic = 0.8
+roughness = 0.72
+
+[sub_resource type="BoxMesh" id="RailMesh_5"]
+material = SubResource("RailMat_Bolt")
+
+[sub_resource type="MultiMesh" id="RailBatch_AnchorBolts"]
+transform_format = 1
+instance_count = 24
+mesh = SubResource("RailMesh_5")
+buffer = PackedFloat32Array(0.075, 0, 0, -10.9, 0, 0.024, 0, -0.068, 0, 0, 0.075, -0.57, 0.075, 0, 0, -10.9, 0, 0.024, 0, -0.068, 0, 0, 0.075, 0.57, 0.075, 0, 0, -8.918182, 0, 0.024, 0, -0.068, 0, 0, 0.075, -0.57, 0.075, 0, 0, -8.918182, 0, 0.024, 0, -0.068, 0, 0, 0.075, 0.57, 0.075, 0, 0, -6.936364, 0, 0.024, 0, -0.068, 0, 0, 0.075, -0.57, 0.075, 0, 0, -6.936364, 0, 0.024, 0, -0.068, 0, 0, 0.075, 0.57, 0.075, 0, 0, -4.954545, 0, 0.024, 0, -0.068, 0, 0, 0.075, -0.57, 0.075, 0, 0, -4.954545, 0, 0.024, 0, -0.068, 0, 0, 0.075, 0.57, 0.075, 0, 0, -2.972727, 0, 0.024, 0, -0.068, 0, 0, 0.075, -0.57, 0.075, 0, 0, -2.972727, 0, 0.024, 0, -0.068, 0, 0, 0.075, 0.57, 0.075, 0, 0, -0.9909091, 0, 0.024, 0, -0.068, 0, 0, 0.075, -0.57, 0.075, 0, 0, -0.9909091, 0, 0.024, 0, -0.068, 0, 0, 0.075, 0.57, 0.075, 0, 0, 0.9909091, 0, 0.024, 0, -0.068, 0, 0, 0.075, -0.57, 0.075, 0, 0, 0.9909091, 0, 0.024, 0, -0.068, 0, 0, 0.075, 0.57, 0.075, 0, 0, 2.972727, 0, 0.024, 0, -0.068, 0, 0, 0.075, -0.57, 0.075, 0, 0, 2.972727, 0, 0.024, 0, -0.068, 0, 0, 0.075, 0.57, 0.075, 0, 0, 4.954545, 0, 0.024, 0, -0.068, 0, 0, 0.075, -0.57, 0.075, 0, 0, 4.954545, 0, 0.024, 0, -0.068, 0, 0, 0.075, 0.57, 0.075, 0, 0, 6.936364, 0, 0.024, 0, -0.068, 0, 0, 0.075, -0.57, 0.075, 0, 0, 6.936364, 0, 0.024, 0, -0.068, 0, 0, 0.075, 0.57, 0.075, 0, 0, 8.918182, 0, 0.024, 0, -0.068, 0, 0, 0.075, -0.57, 0.075, 0, 0, 8.918182, 0, 0.024, 0, -0.068, 0, 0, 0.075, 0.57, 0.075, 0, 0, 10.9, 0, 0.024, 0, -0.068, 0, 0, 0.075, -0.57, 0.075, 0, 0, 10.9, 0, 0.024, 0, -0.068, 0, 0, 0.075, 0.57)
+
+[sub_resource type="MultiMesh" id="RailBatch_GuideFasteners"]
+transform_format = 1
+instance_count = 24
+mesh = SubResource("RailMesh_5")
+buffer = PackedFloat32Array(0.04, 0, 0, -10.9, 0, 0.012, 0, 0.156, 0, 0, 0.04, -0.32, 0.04, 0, 0, -10.9, 0, 0.012, 0, 0.156, 0, 0, 0.04, 0.32, 0.04, 0, 0, -8.918182, 0, 0.012, 0, 0.156, 0, 0, 0.04, -0.32, 0.04, 0, 0, -8.918182, 0, 0.012, 0, 0.156, 0, 0, 0.04, 0.32, 0.04, 0, 0, -6.936364, 0, 0.012, 0, 0.156, 0, 0, 0.04, -0.32, 0.04, 0, 0, -6.936364, 0, 0.012, 0, 0.156, 0, 0, 0.04, 0.32, 0.04, 0, 0, -4.954545, 0, 0.012, 0, 0.156, 0, 0, 0.04, -0.32, 0.04, 0, 0, -4.954545, 0, 0.012, 0, 0.156, 0, 0, 0.04, 0.32, 0.04, 0, 0, -2.972727, 0, 0.012, 0, 0.156, 0, 0, 0.04, -0.32, 0.04, 0, 0, -2.972727, 0, 0.012, 0, 0.156, 0, 0, 0.04, 0.32, 0.04, 0, 0, -0.9909091, 0, 0.012, 0, 0.156, 0, 0, 0.04, -0.32, 0.04, 0, 0, -0.9909091, 0, 0.012, 0, 0.156, 0, 0, 0.04, 0.32, 0.04, 0, 0, 0.9909091, 0, 0.012, 0, 0.156, 0, 0, 0.04, -0.32, 0.04, 0, 0, 0.9909091, 0, 0.012, 0, 0.156, 0, 0, 0.04, 0.32, 0.04, 0, 0, 2.972727, 0, 0.012, 0, 0.156, 0, 0, 0.04, -0.32, 0.04, 0, 0, 2.972727, 0, 0.012, 0, 0.156, 0, 0, 0.04, 0.32, 0.04, 0, 0, 4.954545, 0, 0.012, 0, 0.156, 0, 0, 0.04, -0.32, 0.04, 0, 0, 4.954545, 0, 0.012, 0, 0.156, 0, 0, 0.04, 0.32, 0.04, 0, 0, 6.936364, 0, 0.012, 0, 0.156, 0, 0, 0.04, -0.32, 0.04, 0, 0, 6.936364, 0, 0.012, 0, 0.156, 0, 0, 0.04, 0.32, 0.04, 0, 0, 8.918182, 0, 0.012, 0, 0.156, 0, 0, 0.04, -0.32, 0.04, 0, 0, 8.918182, 0, 0.012, 0, 0.156, 0, 0, 0.04, 0.32, 0.04, 0, 0, 10.9, 0, 0.012, 0, 0.156, 0, 0, 0.04, -0.32, 0.04, 0, 0, 10.9, 0, 0.012, 0, 0.156, 0, 0, 0.04, 0.32)
+
+[sub_resource type="StandardMaterial3D" id="RailMat_Yellow"]
+albedo_color = Color(0.95, 0.66, 0.08, 1)
+metallic = 0.15
+roughness = 0.72
+
+[sub_resource type="BoxMesh" id="RailMesh_6"]
+material = SubResource("RailMat_Yellow")
+size = Vector3(0.16, 0.26, 0.9)
+
+[sub_resource type="BoxMesh" id="RailMesh_7"]
+material = SubResource("RailMat_Black")
+size = Vector3(0.04, 0.16, 0.65)
+
+[sub_resource type="BoxMesh" id="RailMesh_8"]
+material = SubResource("RailMat_Track")
+size = Vector3(22.8, 0.09, 0.27)
+
+[sub_resource type="BoxMesh" id="RailMesh_9"]
+material = SubResource("RailMat_Steel")
+size = Vector3(22.8, 0.07, 0.025)
+
+[sub_resource type="StandardMaterial3D" id="ArmMat_Graphite"]
+albedo_color = Color(0.045, 0.055, 0.065, 1)
+metallic = 0.05
+roughness = 0.48
+
+[sub_resource type="BoxMesh" id="ArmMesh_0"]
+material = SubResource("ArmMat_Graphite")
+size = Vector3(1.4, 0.2, 1.2)
+
+[sub_resource type="CylinderMesh" id="ArmMesh_1"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.55
+bottom_radius = 0.55
+height = 0.6
+radial_segments = 32
+
+[sub_resource type="StandardMaterial3D" id="ArmMat_White"]
+albedo_color = Color(0.77, 0.8, 0.82, 1)
+metallic = 0.05
+roughness = 0.48
+
+[sub_resource type="CylinderMesh" id="ArmMesh_9"]
+material = SubResource("ArmMat_White")
+top_radius = 0.23
+bottom_radius = 0.23
+height = 1.38
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_11"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.245
+bottom_radius = 0.245
+height = 0.14
+radial_segments = 32
+
+[sub_resource type="StandardMaterial3D" id="ArmMat_Red"]
+albedo_color = Color(0.88, 0.075, 0.035, 1)
+metallic = 0.05
+roughness = 0.48
+
+[sub_resource type="CylinderMesh" id="ArmMesh_12"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.236
+bottom_radius = 0.236
+height = 0.03
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_13"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.245
+bottom_radius = 0.245
+height = 0.14
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_14"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.236
+bottom_radius = 0.236
+height = 0.03
+radial_segments = 32
+
+[sub_resource type="BoxMesh" id="ArmMesh_15"]
+material = SubResource("ArmMat_Graphite")
+size = Vector3(0.13, 0.621, 0.016)
+
+[sub_resource type="StandardMaterial3D" id="ArmMat_Steel"]
+albedo_color = Color(0.36, 0.4, 0.44, 1)
+metallic = 0.65
+roughness = 0.48
+
+[sub_resource type="BoxMesh" id="ArmMesh_16"]
+material = SubResource("ArmMat_Steel")
+size = Vector3(0.09, 0.012, 0.005)
+
+[sub_resource type="BoxMesh" id="ArmMesh_17"]
+material = SubResource("ArmMat_Steel")
+size = Vector3(0.09, 0.012, 0.005)
+
+[sub_resource type="BoxMesh" id="ArmMesh_18"]
+material = SubResource("ArmMat_Steel")
+size = Vector3(0.09, 0.012, 0.005)
+
+[sub_resource type="BoxMesh" id="ArmMesh_19"]
+material = SubResource("ArmMat_Graphite")
+size = Vector3(0.13, 0.621, 0.016)
+
+[sub_resource type="BoxMesh" id="ArmMesh_20"]
+material = SubResource("ArmMat_Steel")
+size = Vector3(0.09, 0.012, 0.005)
+
+[sub_resource type="BoxMesh" id="ArmMesh_21"]
+material = SubResource("ArmMat_Steel")
+size = Vector3(0.09, 0.012, 0.005)
+
+[sub_resource type="BoxMesh" id="ArmMesh_22"]
+material = SubResource("ArmMat_Steel")
+size = Vector3(0.09, 0.012, 0.005)
+
+[sub_resource type="CylinderMesh" id="ArmMesh_10"]
+material = SubResource("ArmMat_White")
+top_radius = 0.2
+bottom_radius = 0.2
+height = 1.02
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_23"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.215
+bottom_radius = 0.215
+height = 0.14
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_24"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.206
+bottom_radius = 0.206
+height = 0.03
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_25"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.215
+bottom_radius = 0.215
+height = 0.14
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_26"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.206
+bottom_radius = 0.206
+height = 0.03
+radial_segments = 32
+
+[sub_resource type="BoxMesh" id="ArmMesh_27"]
+material = SubResource("ArmMat_Graphite")
+size = Vector3(0.13, 0.459, 0.016)
+
+[sub_resource type="BoxMesh" id="ArmMesh_28"]
+material = SubResource("ArmMat_Steel")
+size = Vector3(0.09, 0.012, 0.005)
+
+[sub_resource type="BoxMesh" id="ArmMesh_29"]
+material = SubResource("ArmMat_Steel")
+size = Vector3(0.09, 0.012, 0.005)
+
+[sub_resource type="BoxMesh" id="ArmMesh_30"]
+material = SubResource("ArmMat_Steel")
+size = Vector3(0.09, 0.012, 0.005)
+
+[sub_resource type="BoxMesh" id="ArmMesh_31"]
+material = SubResource("ArmMat_Graphite")
+size = Vector3(0.13, 0.459, 0.016)
+
+[sub_resource type="BoxMesh" id="ArmMesh_32"]
+material = SubResource("ArmMat_Steel")
+size = Vector3(0.09, 0.012, 0.005)
+
+[sub_resource type="BoxMesh" id="ArmMesh_33"]
+material = SubResource("ArmMat_Steel")
+size = Vector3(0.09, 0.012, 0.005)
+
+[sub_resource type="BoxMesh" id="ArmMesh_34"]
+material = SubResource("ArmMat_Steel")
+size = Vector3(0.09, 0.012, 0.005)
+
+[sub_resource type="CylinderMesh" id="ArmMesh_87"]
+material = SubResource("ArmMat_White")
+top_radius = 0.22
+bottom_radius = 0.22
+height = 0.3
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_89"]
+material = SubResource("ArmMat_White")
+top_radius = 0.14
+bottom_radius = 0.14
+height = 0.27
+radial_segments = 32
+
+[sub_resource type="BoxMesh" id="ArmMesh_91"]
+material = SubResource("ArmMat_Graphite")
+size = Vector3(0.8, 0.1, 0.5)
+
+[sub_resource type="CylinderMesh" id="ArmMesh_93"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.09
+bottom_radius = 0.09
+height = 0.12
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_94"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.1
+bottom_radius = 0.1
+height = 0.02
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_95"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.09
+bottom_radius = 0.09
+height = 0.12
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_96"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.1
+bottom_radius = 0.1
+height = 0.02
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_97"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.09
+bottom_radius = 0.09
+height = 0.12
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_98"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.1
+bottom_radius = 0.1
+height = 0.02
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_99"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.09
+bottom_radius = 0.09
+height = 0.12
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_100"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.1
+bottom_radius = 0.1
+height = 0.02
+radial_segments = 16
+
+[sub_resource type="BoxMesh" id="ArmMesh_92"]
+material = SubResource("ArmMat_Steel")
+size = Vector3(0.68, 0.018, 0.4)
+
+[sub_resource type="CylinderMesh" id="ArmMesh_90"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.19
+bottom_radius = 0.19
+height = 0.07
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_69"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.17
+bottom_radius = 0.17
+height = 0.3
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_70"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.153
+bottom_radius = 0.153
+height = 0.047
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_71"]
+material = SubResource("ArmMat_Steel")
+top_radius = 0.0697
+bottom_radius = 0.0697
+height = 0.018
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_72"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_73"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_74"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_75"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_76"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_77"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_78"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.153
+bottom_radius = 0.153
+height = 0.047
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_79"]
+material = SubResource("ArmMat_Steel")
+top_radius = 0.0697
+bottom_radius = 0.0697
+height = 0.018
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_80"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_81"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_82"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_83"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_84"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_85"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_88"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.23
+bottom_radius = 0.23
+height = 0.06
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_52"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.28
+bottom_radius = 0.28
+height = 0.46
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_53"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.252
+bottom_radius = 0.252
+height = 0.047
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_54"]
+material = SubResource("ArmMat_Steel")
+top_radius = 0.1148
+bottom_radius = 0.1148
+height = 0.018
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_55"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_56"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_57"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_58"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_59"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_60"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_61"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.252
+bottom_radius = 0.252
+height = 0.047
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_62"]
+material = SubResource("ArmMat_Steel")
+top_radius = 0.1148
+bottom_radius = 0.1148
+height = 0.018
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_63"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_64"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_65"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_66"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_67"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_68"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_86"]
+material = SubResource("ArmMat_Steel")
+top_radius = 0.13
+bottom_radius = 0.13
+height = 0.24
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_35"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.31
+bottom_radius = 0.31
+height = 0.54
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_36"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.279
+bottom_radius = 0.279
+height = 0.047
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_37"]
+material = SubResource("ArmMat_Steel")
+top_radius = 0.1271
+bottom_radius = 0.1271
+height = 0.018
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_38"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_39"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_40"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_41"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_42"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_43"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_44"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.279
+bottom_radius = 0.279
+height = 0.047
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_45"]
+material = SubResource("ArmMat_Steel")
+top_radius = 0.1271
+bottom_radius = 0.1271
+height = 0.018
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_46"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_47"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_48"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_49"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_50"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_51"]
+material = SubResource("ArmMat_Graphite")
+top_radius = 0.017
+bottom_radius = 0.017
+height = 0.017
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_4"]
+material = SubResource("ArmMat_Steel")
+top_radius = 0.35
+bottom_radius = 0.35
+height = 0.11
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_2"]
+material = SubResource("ArmMat_Steel")
+top_radius = 0.59
+bottom_radius = 0.59
+height = 0.1
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_3"]
+material = SubResource("ArmMat_Red")
+top_radius = 0.56
+bottom_radius = 0.56
+height = 0.07
+radial_segments = 32
+
+[sub_resource type="CylinderMesh" id="ArmMesh_5"]
+material = SubResource("ArmMat_Steel")
+top_radius = 0.045
+bottom_radius = 0.045
+height = 0.03
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_6"]
+material = SubResource("ArmMat_Steel")
+top_radius = 0.045
+bottom_radius = 0.045
+height = 0.03
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_7"]
+material = SubResource("ArmMat_Steel")
+top_radius = 0.045
+bottom_radius = 0.045
+height = 0.03
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="ArmMesh_8"]
+material = SubResource("ArmMat_Steel")
+top_radius = 0.045
+bottom_radius = 0.045
+height = 0.03
+radial_segments = 16
+
+[sub_resource type="BoxMesh" id="RailMesh_10"]
+material = SubResource("RailMat_Steel")
+size = Vector3(0.3, 0.09, 0.24)
+
+[sub_resource type="BoxMesh" id="RailMesh_11"]
+material = SubResource("RailMat_Black")
+size = Vector3(0.25, 0.07, 0.012)
+
+[sub_resource type="BoxMesh" id="RailMesh_12"]
+material = SubResource("RailMat_Track")
+size = Vector3(1.4, 0.13, 0.045)
+
+[sub_resource type="BoxMesh" id="RailMesh_13"]
+material = SubResource("RailMat_Yellow")
+size = Vector3(0.8, 0.025, 0.012)
+
+[sub_resource type="BoxMesh" id="RailMesh_14"]
+material = SubResource("RailMat_Black")
+size = Vector3(0.28, 0.19, 0.24)
+
+[sub_resource type="BoxMesh" id="RailMesh_15"]
+material = SubResource("RailMat_Steel")
+size = Vector3(0.25, 0.12, 0.28)
+
+[sub_resource type="BoxMesh" id="RailMesh_16"]
+material = SubResource("RailMat_Black")
+
+[sub_resource type="MultiMesh" id="RailBatch_CableServiceLoop"]
+transform_format = 1
+instance_count = 16
+mesh = SubResource("RailMesh_16")
+buffer = PackedFloat32Array(0.1, 0, 0, 0, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.12, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.24, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.36, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.48, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.6, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.72, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.84, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.96, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.085, 0, 0, -0.96, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.085, 0, 0, -1.04, 0, 0.065, 0, -0.04143594, 0, 0, 0.17, 0.82, 0.085, 0, 0, -1.098564, 0, 0.065, 0, -0.1, 0, 0, 0.17, 0.82, 0.085, 0, 0, -1.12, 0, 0.065, 0, -0.18, 0, 0, 0.17, 0.82, 0.085, 0, 0, -1.098564, 0, 0.065, 0, -0.26, 0, 0, 0.17, 0.82, 0.085, 0, 0, -1.04, 0, 0.065, 0, -0.3185641, 0, 0, 0.17, 0.82, 0.085, 0, 0, -0.96, 0, 0.065, 0, -0.34, 0, 0, 0.17, 0.82)
+
+[sub_resource type="BoxMesh" id="BoxMesh_nb4f5"]
+size = Vector3(1.2, 0.05, 0.8)
+
+[sub_resource type="BoxMesh" id="BoxMesh_tsdvb"]
+size = Vector3(1.8, 1, 2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_keyo3"]
+size = Vector3(1.8, 1, 2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_vnvhg"]
+size = Vector3(1.2, 1.2, 0.6)
+
+[sub_resource type="StandardMaterial3D" id="Mat_HMIDisplay"]
+shading_mode = 0
+albedo_color = Color(0.018, 0.03, 0.045, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_k8rwe"]
+size = Vector3(1, 0.65, 0.08)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_y1mhp"]
+size = Vector3(1.2, 1.2, 0.6)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_br4io"]
+size = Vector3(1, 0.65, 0.08)
+
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_fjy48"]
+panorama = ExtResource("1_oq3xt")
+
+[sub_resource type="Sky" id="Sky_oq3xt"]
+sky_material = SubResource("PanoramaSkyMaterial_fjy48")
+
+[sub_resource type="Environment" id="Environment_xaprj"]
+background_mode = 2
+background_color = Color(0.39607844, 0.8039216, 1, 0.13333334)
+background_energy_multiplier = 0.5
+sky = SubResource("Sky_oq3xt")
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_qjjrk"]
+radius = 0.35
+height = 1.8
+
+[sub_resource type="GDScript" id="Script_CellGate"]
+script/source = "extends Node3D
+
+var gate_closed: bool = true
+var gate_moving: bool = false
+var latest_status: String = \"Ready to run\"
+@onready var slider: Node3D = $Slider
+@onready var robot: Node = $\"../../RobotSystem\"
+@onready var player: Node3D = $\"../../Player\"
+@onready var status_label: Label = $\"../../CellHUD/Status\"
+
+func _ready() -> void:
+	robot.connect(\"status_changed\", _on_robot_status)
+
+func _process(_delta: float) -> void:
+	var state: String = \"CLOSED\"
+	if gate_moving:
+		state = \"MOVING\"
+	elif not gate_closed:
+		state = \"OPEN\"
+	if bool(robot.get(\"animation_running\")):
+		state += \" / LOCKED\"
+	status_label.text = \"ROBOT CELL  |  Gate: \" + state + \"\\nG: slide loading gate  |  Use your existing demo-start control\\n\" + latest_status
+
+func _on_robot_status(message: String) -> void:
+	latest_status = message
+
+func player_inside() -> bool:
+	var p: Vector3 = get_parent().to_local(player.global_position)
+	return p.x > -11.5 and p.x < 13.5 and p.z > -5.5 and p.z < 2.5
+
+func cycle_block_reason() -> String:
+	if gate_moving or not gate_closed:
+		return \"Start blocked: close the loading gate first (G).\"
+	if player_inside():
+		return \"Start blocked: leave the enclosure, then close the gate.\"
+	return \"\"
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.physical_keycode == KEY_G:
+			get_viewport().set_input_as_handled()
+			toggle_gate()
+
+func toggle_gate() -> void:
+	if gate_moving:
+		return
+	if bool(robot.get(\"animation_running\")):
+		latest_status = \"Gate locked: wait for the robot cycle to finish.\"
+		return
+	# Keep the exit open if the player is still in the cell or doorway.
+	var p: Vector3 = to_local(player.global_position)
+	if not gate_closed and (player_inside() or (absf(p.x) < 1.4 and absf(p.z) < 0.65)):
+		latest_status = \"Leave the enclosure and doorway before closing the gate.\"
+		return
+	var opening: bool = gate_closed
+	gate_closed = false
+	gate_moving = true
+	var slide: Tween = create_tween()
+	slide.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	slide.tween_property(slider, \"position:x\", 2.2 if opening else 0.0, 1.2)
+	await slide.finished
+	gate_closed = not opening
+	gate_moving = false
+	latest_status = \"Gate open: load the sheet, then leave the cell.\" if opening else \"Gate closed: ready to run.\"
+"
+
+[sub_resource type="StandardMaterial3D" id="Mat_LightFenceWire"]
+shading_mode = 0
+albedo_color = Color(0.17, 0.21, 0.24, 1)
+
+[sub_resource type="BoxMesh" id="Mesh_LightFenceWire"]
+material = SubResource("Mat_LightFenceWire")
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_GatePanel"]
+transform_format = 1
+instance_count = 19
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="StandardMaterial3D" id="Mat_FenceFrame"]
+albedo_color = Color(0.92, 0.63, 0.06, 1)
+metallic = 0.35
+roughness = 0.65
+
+[sub_resource type="BoxMesh" id="Mesh_FencePost"]
+material = SubResource("Mat_FenceFrame")
+size = Vector3(0.09, 2.3, 0.09)
+
+[sub_resource type="BoxMesh" id="Mesh_FenceFrame"]
+material = SubResource("Mat_FenceFrame")
+size = Vector3(1, 0.065, 0.065)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_GatePanel"]
+size = Vector3(2, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel01"]
+transform_format = 1
+instance_count = 22
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel01"]
+size = Vector3(2.5, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel02"]
+transform_format = 1
+instance_count = 21
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel02"]
+size = Vector3(2.2777777, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel03"]
+transform_format = 1
+instance_count = 21
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel03"]
+size = Vector3(2.2777777, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel04"]
+transform_format = 1
+instance_count = 21
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel04"]
+size = Vector3(2.2777777, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel05"]
+transform_format = 1
+instance_count = 21
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel05"]
+size = Vector3(2.2777777, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel06"]
+transform_format = 1
+instance_count = 21
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel06"]
+size = Vector3(2.2777777, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel07"]
+transform_format = 1
+instance_count = 21
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel07"]
+size = Vector3(2.2777777, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel08"]
+transform_format = 1
+instance_count = 21
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel08"]
+size = Vector3(2.2777777, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel09"]
+transform_format = 1
+instance_count = 21
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel09"]
+size = Vector3(2.2777777, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel10"]
+transform_format = 1
+instance_count = 21
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.1898148, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.3796296, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.5694444, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.7592592, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.949074, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.277778, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel10"]
+size = Vector3(2.2777777, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel11"]
+transform_format = 1
+instance_count = 22
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel11"]
+size = Vector3(2.5, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel12"]
+transform_format = 1
+instance_count = 22
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel12"]
+size = Vector3(2.5, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel13"]
+transform_format = 1
+instance_count = 22
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel13"]
+size = Vector3(2.5, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel14"]
+transform_format = 1
+instance_count = 22
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel14"]
+size = Vector3(2.5, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel15"]
+transform_format = 1
+instance_count = 22
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel15"]
+size = Vector3(2.5, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel16"]
+transform_format = 1
+instance_count = 22
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel16"]
+size = Vector3(2.5, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel17"]
+transform_format = 1
+instance_count = 22
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel17"]
+size = Vector3(2.5, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel18"]
+transform_format = 1
+instance_count = 22
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel18"]
+size = Vector3(2.5, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel19"]
+transform_format = 1
+instance_count = 22
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel19"]
+size = Vector3(2.5, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel20"]
+transform_format = 1
+instance_count = 22
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.09615385, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2884615, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4807692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6730769, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8653846, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 1.057692, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2.5, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel20"]
+size = Vector3(2.5, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel21"]
+transform_format = 1
+instance_count = 19
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel21"]
+size = Vector3(2, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel22"]
+transform_format = 1
+instance_count = 19
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel22"]
+size = Vector3(2, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel23"]
+transform_format = 1
+instance_count = 19
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel23"]
+size = Vector3(2, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel24"]
+transform_format = 1
+instance_count = 19
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel24"]
+size = Vector3(2, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel25"]
+transform_format = 1
+instance_count = 19
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel25"]
+size = Vector3(2, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel26"]
+transform_format = 1
+instance_count = 19
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel26"]
+size = Vector3(2, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel27"]
+transform_format = 1
+instance_count = 19
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel27"]
+size = Vector3(2, 2.3, 0.09)
+
+[sub_resource type="MultiMesh" id="Mesh_Fence_Panel28"]
+transform_format = 1
+instance_count = 19
+mesh = SubResource("Mesh_LightFenceWire")
+buffer = PackedFloat32Array(0.012, 0, 0, -0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, -0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.2, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.4, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.6, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 0.012, 0, 0, 0.8, 0, 2.1, 0, 0, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.8590909, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, -0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.09545455, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.2863636, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.4772727, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.6681818, 0, 0, 0.012, 0, 2, 0, 0, 0, 0, 0.012, 0, 0.8590909, 0, 0, 0.012, 0)
+
+[sub_resource type="BoxShape3D" id="Shape_Fence_Panel28"]
+size = Vector3(2, 2.3, 0.09)
+
+[sub_resource type="StandardMaterial3D" id="Mat_CellStripe"]
+albedo_color = Color(0.95, 0.72, 0.09, 1)
+roughness = 0.9
+
+[sub_resource type="BoxMesh" id="Mesh_CellStripe"]
+material = SubResource("Mat_CellStripe")
+size = Vector3(1, 0.008, 0.08)
+
+[sub_resource type="GDScript" id="Script_CellHMI"]
+script/source = "extends Node
+
+# Presentation-only connection simulation; no PLC/network transport is used.
+var states: Array[String] = [\"CONNECTING\", \"CONNECTING\", \"CONNECTING\", \"CONNECTING\"]
+var station_names: Array[String] = [\"LASER\", \"BENDER\", \"WELDER\", \"INSPECTION\"]
+var elapsed: float = 0.0
+var refresh_elapsed: float = 0.0
+var latest_status: String = \"Establishing station connections...\"
+var overlay: PanelContainer
+var summary: Label
+var message_label: Label
+var card_labels: Array[Label] = []
+var card_styles: Array[StyleBoxFlat] = []
+var physical_label: Label3D
+var lights: Array[MeshInstance3D] = []
+var lamp_materials: Array[StandardMaterial3D] = []
+@onready var robot: Node = $\"../RobotSystem\"
+@onready var gate: Node = $\"../CellEnclosure/AccessGate\"
+@onready var console: Node3D = $\"../HMIConsole\"
+
+func _ready() -> void:
+	for path: String in [\"../LaserCutter/HeartbeatLight\", \"../Bender/HeartbeatLight2\", \"../WeldCell/HeartbeatLight3\", \"../Inspection/HeartbeatLight4\"]:
+		var light: MeshInstance3D = get_node(path) as MeshInstance3D
+		var material: StandardMaterial3D = StandardMaterial3D.new()
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		light.material_override = material
+		light.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		light.visible = true
+		lights.append(light)
+		lamp_materials.append(material)
+	robot.connect(\"status_changed\", _on_robot_status)
+	_build_hmi()
+	_refresh()
+
+func _build_hmi() -> void:
+	var canvas: CanvasLayer = CanvasLayer.new()
+	canvas.layer = 3
+	add_child(canvas)
+	overlay = PanelContainer.new()
+	overlay.anchor_left = 1.0
+	overlay.anchor_right = 1.0
+	overlay.anchor_top = 1.0
+	overlay.anchor_bottom = 1.0
+	overlay.offset_left = -610.0
+	overlay.offset_top = -245.0
+	overlay.offset_right = -18.0
+	overlay.offset_bottom = -18.0
+	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var background: StyleBoxFlat = StyleBoxFlat.new()
+	background.bg_color = Color(0.025, 0.04, 0.065, 0.96)
+	background.set_corner_radius_all(8)
+	background.content_margin_left = 16.0
+	background.content_margin_right = 16.0
+	background.content_margin_top = 12.0
+	background.content_margin_bottom = 12.0
+	overlay.add_theme_stylebox_override(\"panel\", background)
+	canvas.add_child(overlay)
+	var column: VBoxContainer = VBoxContainer.new()
+	column.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	column.add_theme_constant_override(\"separation\", 10)
+	overlay.add_child(column)
+	var heading: Label = Label.new()
+	heading.text = \"CELL HMI  /  SIMULATED CONNECTIONS\"
+	heading.add_theme_font_size_override(\"font_size\", 20)
+	column.add_child(heading)
+	summary = Label.new()
+	column.add_child(summary)
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override(\"separation\", 8)
+	column.add_child(row)
+	for i: int in range(4):
+		var card: PanelContainer = PanelContainer.new()
+		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var style: StyleBoxFlat = StyleBoxFlat.new()
+		style.bg_color = Color(0.055, 0.075, 0.10)
+		style.set_border_width_all(2)
+		style.set_corner_radius_all(4)
+		style.content_margin_left = 8.0
+		style.content_margin_right = 8.0
+		style.content_margin_top = 10.0
+		style.content_margin_bottom = 10.0
+		card.add_theme_stylebox_override(\"panel\", style)
+		row.add_child(card)
+		var label: Label = Label.new()
+		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		label.add_theme_font_size_override(\"font_size\", 14)
+		card.add_child(label)
+		card_labels.append(label)
+		card_styles.append(style)
+	message_label = Label.new()
+	message_label.custom_minimum_size.x = 550.0
+	message_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	column.add_child(message_label)
+	var help: Label = Label.new()
+	help.text = \"H: HMI  |  J: welder fault (idle)  |  R: reconnect  |  G: gate\"
+	help.add_theme_font_size_override(\"font_size\", 13)
+	help.modulate = Color(0.7, 0.76, 0.84)
+	column.add_child(help)
+	physical_label = Label3D.new()
+	physical_label.name = \"LiveHMIDisplay\"
+	physical_label.position = Vector3(0.0, 1.25, 0.385)
+	physical_label.pixel_size = 0.00125
+	physical_label.font_size = 25
+	physical_label.outline_size = 3
+	physical_label.modulate = Color(0.7, 0.95, 1.0)
+	physical_label.shaded = false
+	physical_label.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	console.add_child(physical_label)
+
+func _process(delta: float) -> void:
+	elapsed += delta
+	refresh_elapsed += delta
+	for i: int in range(4):
+		if states[i] == \"CONNECTING\" and elapsed >= 1.5 + float(i) * 0.45:
+			states[i] = \"READY\"
+	if refresh_elapsed >= 0.15:
+		refresh_elapsed = 0.0
+		_refresh()
+
+func _refresh() -> void:
+	var rows: String = \"CELL CONTROL  /  SIMULATION\\n\"
+	for i: int in range(4):
+		var color: Color = Color(0.18, 0.95, 0.42)
+		if states[i] == \"CONNECTING\":
+			color = Color(1.0, 0.72, 0.09) * (0.6 + 0.4 * absf(sin(elapsed * 3.0)))
+		elif states[i] == \"FAULT\":
+			color = Color(1.0, 0.13, 0.16)
+		elif states[i] == \"RUNNING\":
+			color *= 1.0 if sin(elapsed * 10.0) > 0.0 else 0.3
+		color.a = 1.0
+		lamp_materials[i].albedo_color = color
+		lights[i].visible = true
+		card_styles[i].border_color = color
+		card_labels[i].text = station_names[i] + \"\\n\" + states[i]
+		rows += station_names[i] + \": \" + states[i] + \"\\n\"
+	var gate_text: String = \"CLOSED\" if bool(gate.get(\"gate_closed\")) else \"OPEN\"
+	if bool(gate.get(\"gate_moving\")):
+		gate_text = \"MOVING\"
+	var cycle: String = \"RUNNING\" if bool(robot.get(\"animation_running\")) else \"IDLE\"
+	summary.text = \"PART %s   |   CYCLE: %s   |   GATE: %s\" % [str(robot.get(\"part_id\")), cycle, gate_text]
+	message_label.text = latest_status
+	rows += \"PART %s  |  GATE %s\" % [str(robot.get(\"part_id\")), gate_text]
+	if physical_label.text != rows:
+		physical_label.text = rows
+
+func _on_robot_status(message: String) -> void:
+	latest_status = message
+
+func cycle_block_reason() -> String:
+	for i: int in range(4):
+		var required: bool = i == 0 or (i == 1 and bool(robot.get(\"use_bender\"))) or (i == 2 and bool(robot.get(\"use_welder\"))) or (i == 3 and bool(robot.get(\"use_inspection\")))
+		if required and states[i] != \"READY\":
+			return \"Start blocked: %s is %s.\" % [station_names[i], states[i].to_lower()]
+	return \"\"
+
+func begin_processing(station_name: String) -> void:
+	var index: int = _station_index(station_name)
+	if index >= 0:
+		states[index] = \"RUNNING\"
+	_refresh()
+
+func end_processing(station_name: String) -> void:
+	var index: int = _station_index(station_name)
+	if index >= 0:
+		states[index] = \"READY\"
+	_refresh()
+
+func _station_index(station_name: String) -> int:
+	var normalized: String = station_name.to_upper()
+	for i: int in range(4):
+		if normalized.begins_with(station_names[i]):
+			return i
+	return -1
+
+func _unhandled_input(event: InputEvent) -> void:
+	if not (event is InputEventKey) or not event.pressed or event.echo:
+		return
+	if event.physical_keycode == KEY_H:
+		overlay.visible = not overlay.visible
+		get_viewport().set_input_as_handled()
+	elif event.physical_keycode == KEY_J or event.physical_keycode == KEY_R:
+		get_viewport().set_input_as_handled()
+		if bool(robot.get(\"animation_running\")):
+			latest_status = \"Wait for the cycle to finish before testing connection faults.\"
+			return
+		if event.physical_keycode == KEY_J:
+			states[2] = \"FAULT\"
+			latest_status = \"Welder connection timed out (simulated). Press R to reconnect.\"
+		else:
+			states.assign([\"CONNECTING\", \"CONNECTING\", \"CONNECTING\", \"CONNECTING\"])
+			elapsed = 0.0
+			latest_status = \"Reconnecting all stations...\"
+		_refresh()
+"
+
+[node name="Factory" type="Node3D" unique_id=1626147915]
+
+[node name="Floor" type="MeshInstance3D" parent="." unique_id=808266017]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
+mesh = SubResource("BoxMesh_fjy48")
+
+[node name="FloorBody" type="StaticBody3D" parent="Floor" unique_id=827399880]
+
+[node name="FloorCollision" type="CollisionShape3D" parent="Floor/FloorBody" unique_id=1715374957]
+shape = SubResource("BoxShape3D_oq3xt")
+
+[node name="LaserCutter" type="MeshInstance3D" parent="." unique_id=2040931088]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1.25, -3)
+
+[node name="HeartbeatLight" type="MeshInstance3D" parent="LaserCutter" unique_id=1545097713]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.43, 0.03, 1.15)
+mesh = SubResource("SphereMesh_fjy48")
+
+[node name="LaserBody" type="StaticBody3D" parent="LaserCutter" unique_id=1321645022]
+
+[node name="LaserCollision" type="CollisionShape3D" parent="LaserCutter/LaserBody" unique_id=1321422775]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.725, 0)
+shape = SubResource("Shape_AlignedLaser")
+
+[node name="Cutter_LaserBed2" parent="LaserCutter" unique_id=416561975 instance=ExtResource("1_br4io")]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0, -1.25, 0)
+
+[node name="LaserCutterLabel" type="Label3D" parent="LaserCutter" unique_id=183770471]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.5, 0)
+pixel_size = 0.01
+billboard = 1
+text = "LASER CUTTER
+"
+font_size = 64
+
+[node name="Bender" type="MeshInstance3D" parent="." unique_id=1482631492]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 1.25, -3)
+
+[node name="HeartbeatLight2" type="MeshInstance3D" parent="Bender" unique_id=475802718]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.35, 1.4, 0.35)
+mesh = SubResource("SphereMesh_fjy48")
+
+[node name="BenderBody" type="StaticBody3D" parent="Bender" unique_id=160471515]
+
+[node name="BenderCollision" type="CollisionShape3D" parent="Bender/BenderBody" unique_id=1951063560]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.2, 0)
+shape = SubResource("Shape_AlignedBender")
+
+[node name="Bender_PressBrake2" parent="Bender" unique_id=2095308421 instance=ExtResource("1_keyo3")]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0, -1.25, 0)
+
+[node name="LoadingTable" type="MeshInstance3D" parent="Bender" unique_id=505327743]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.17, 1.06)
+mesh = SubResource("Mesh_BenderLoadingTable")
+
+[node name="BenderLabel" type="Label3D" parent="Bender" unique_id=1840528113]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.034805775, 2.5, 0)
+pixel_size = 0.01
+billboard = 1
+text = "BENDER
+"
+font_size = 64
+
+[node name="WeldCell" type="MeshInstance3D" parent="." unique_id=715920968]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 1.25, -3)
+
+[node name="HeartbeatLight3" type="MeshInstance3D" parent="WeldCell" unique_id=1904935503]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.15, -0.02, 0.63)
+mesh = SubResource("SphereMesh_fjy48")
+
+[node name="WeldBody" type="StaticBody3D" parent="WeldCell" unique_id=1945519332]
+
+[node name="WeldCollision" type="CollisionShape3D" parent="WeldCell/WeldBody" unique_id=2146872467]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.74, 0)
+shape = SubResource("Shape_AlignedWeld")
+
+[node name="Welder_Gantry2" parent="WeldCell" unique_id=1002987549 instance=ExtResource("3_h5ffw")]
+transform = Transform3D(-1, 0, 0, 0, 1, 0, 0, 0, -1, 0, -1.25, 0)
+
+[node name="WelderLabel" type="Label3D" parent="WeldCell" unique_id=2032856216]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.2657919, 2.5, 0)
+pixel_size = 0.01
+billboard = 1
+text = "WELDER"
+font_size = 64
+
+[node name="Inspection" type="MeshInstance3D" parent="." unique_id=2097605180]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7, 1.25, -3)
+
+[node name="HeartbeatLight4" type="MeshInstance3D" parent="Inspection" unique_id=1971753740]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.35, -0.03, 0.95)
+mesh = SubResource("SphereMesh_fjy48")
+
+[node name="InspectionBody" type="StaticBody3D" parent="Inspection" unique_id=6677027]
+
+[node name="InspectionCollision" type="CollisionShape3D" parent="Inspection/InspectionBody" unique_id=1432208187]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.73, 0)
+shape = SubResource("Shape_AlignedInspection")
+
+[node name="InspectionTableTop" type="MeshInstance3D" parent="Inspection" unique_id=1662287606]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.25, 0)
+mesh = SubResource("Mesh_InspectionTop")
+
+[node name="InspectionLeg0" type="MeshInstance3D" parent="Inspection" unique_id=1684191977]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.38, -0.77, -1.08)
+mesh = SubResource("Mesh_InspectionLeg")
+
+[node name="InspectionLeg1" type="MeshInstance3D" parent="Inspection" unique_id=2144884867]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.38, -0.77, 1.08)
+mesh = SubResource("Mesh_InspectionLeg")
+
+[node name="InspectionLeg2" type="MeshInstance3D" parent="Inspection" unique_id=1710202893]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.38, -0.77, -1.08)
+mesh = SubResource("Mesh_InspectionLeg")
+
+[node name="InspectionLeg3" type="MeshInstance3D" parent="Inspection" unique_id=13342121]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.38, -0.77, 1.08)
+mesh = SubResource("Mesh_InspectionLeg")
+
+[node name="InspectionLabel" type="Label3D" parent="Inspection" unique_id=579017253]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.31113386, 2.5, 0)
+pixel_size = 0.01
+billboard = 1
+text = "INSPECTION
+"
+font_size = 64
+
+[node name="RobotSystem" type="Node3D" parent="." unique_id=1283865291]
+script = SubResource("GDScript_AlignedRobot")
+
+[node name="Rail" type="MeshInstance3D" parent="RobotSystem" unique_id=1475642968]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0.15, 0)
+cast_shadow = 0
+mesh = SubResource("RailMesh_0")
+
+[node name="GuideSupportFront" type="MeshInstance3D" parent="RobotSystem/Rail" unique_id=639896082]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0.32)
+cast_shadow = 0
+mesh = SubResource("RailMesh_1")
+
+[node name="SteelGuideFront" type="MeshInstance3D" parent="RobotSystem/Rail" unique_id=339357496]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.12, 0.32)
+cast_shadow = 0
+mesh = SubResource("RailMesh_2")
+
+[node name="GuideSupportRear" type="MeshInstance3D" parent="RobotSystem/Rail" unique_id=1375838449]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, -0.32)
+cast_shadow = 0
+mesh = SubResource("RailMesh_1")
+
+[node name="SteelGuideRear" type="MeshInstance3D" parent="RobotSystem/Rail" unique_id=953020219]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.12, -0.32)
+cast_shadow = 0
+mesh = SubResource("RailMesh_2")
+
+[node name="CentreServiceCover" type="MeshInstance3D" parent="RobotSystem/Rail" unique_id=2034504420]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.105, 0)
+cast_shadow = 0
+mesh = SubResource("RailMesh_3")
+
+[node name="MountingFeet" type="MultiMeshInstance3D" parent="RobotSystem/Rail" unique_id=331393351]
+cast_shadow = 0
+multimesh = SubResource("RailBatch_MountingFeet")
+
+[node name="AnchorBolts" type="MultiMeshInstance3D" parent="RobotSystem/Rail" unique_id=1102507524]
+cast_shadow = 0
+multimesh = SubResource("RailBatch_AnchorBolts")
+
+[node name="GuideFasteners" type="MultiMeshInstance3D" parent="RobotSystem/Rail" unique_id=927009499]
+cast_shadow = 0
+multimesh = SubResource("RailBatch_GuideFasteners")
+
+[node name="EndStopLeft" type="MeshInstance3D" parent="RobotSystem/Rail" unique_id=149479386]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -11.3, 0.18, 0)
+cast_shadow = 0
+mesh = SubResource("RailMesh_6")
+
+[node name="BufferLeft" type="MeshInstance3D" parent="RobotSystem/Rail" unique_id=321319240]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -11.21, 0.2, 0)
+cast_shadow = 0
+mesh = SubResource("RailMesh_7")
+
+[node name="EndStopRight" type="MeshInstance3D" parent="RobotSystem/Rail" unique_id=2050741567]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 11.3, 0.18, 0)
+cast_shadow = 0
+mesh = SubResource("RailMesh_6")
+
+[node name="BufferRight" type="MeshInstance3D" parent="RobotSystem/Rail" unique_id=411909186]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 11.21, 0.2, 0)
+cast_shadow = 0
+mesh = SubResource("RailMesh_7")
+
+[node name="CableTray" type="MeshInstance3D" parent="RobotSystem/Rail" unique_id=758653722]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0.8)
+cast_shadow = 0
+mesh = SubResource("RailMesh_8")
+
+[node name="TrayEdge0.65" type="MeshInstance3D" parent="RobotSystem/Rail" unique_id=1941493995]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.13, 0.65)
+cast_shadow = 0
+mesh = SubResource("RailMesh_9")
+
+[node name="TrayEdge0.95" type="MeshInstance3D" parent="RobotSystem/Rail" unique_id=187305195]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.13, 0.95)
+cast_shadow = 0
+mesh = SubResource("RailMesh_9")
+
+[node name="Carriage" type="MeshInstance3D" parent="RobotSystem" unique_id=198854380]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 0.4, 0)
+mesh = SubResource("ArmMesh_0")
+
+[node name="RobotBase" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=788146729]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.4, 0)
+mesh = SubResource("ArmMesh_1")
+
+[node name="BasePivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase" unique_id=902397189]
+transform = Transform3D(6.123234e-17, 0, -1, 0, 1, 0, 1, 0, 6.123234e-17, 0, 0.3, 0)
+
+[node name="ShoulderPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot" unique_id=146237934]
+transform = Transform3D(0.8660254, 0.5, 0, -0.5, 0.8660254, 0, 0, 0, 1, 0, 0, 0)
+
+[node name="LowerArm" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1790794962]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+mesh = SubResource("ArmMesh_9")
+
+[node name="LinkEndCollar11" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/LowerArm" unique_id=499401043]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.62, 0)
+mesh = SubResource("ArmMesh_11")
+
+[node name="RedLinkTrim12" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/LowerArm" unique_id=1331634257]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.535, 0)
+mesh = SubResource("ArmMesh_12")
+
+[node name="LinkEndCollar13" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/LowerArm" unique_id=785209724]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.62, 0)
+mesh = SubResource("ArmMesh_13")
+
+[node name="RedLinkTrim14" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/LowerArm" unique_id=1177490414]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.535, 0)
+mesh = SubResource("ArmMesh_14")
+
+[node name="ServicePanel15" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/LowerArm" unique_id=1067981316]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.234)
+mesh = SubResource("ArmMesh_15")
+
+[node name="PanelVent16" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/LowerArm" unique_id=1546830920]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.12, -0.24336)
+mesh = SubResource("ArmMesh_16")
+
+[node name="PanelVent17" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/LowerArm" unique_id=1200343429]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.24336)
+mesh = SubResource("ArmMesh_17")
+
+[node name="PanelVent18" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/LowerArm" unique_id=286209334]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.12, -0.24336)
+mesh = SubResource("ArmMesh_18")
+
+[node name="ServicePanel19" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/LowerArm" unique_id=518720553]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.234)
+mesh = SubResource("ArmMesh_19")
+
+[node name="PanelVent20" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/LowerArm" unique_id=173136285]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.12, 0.24336)
+mesh = SubResource("ArmMesh_20")
+
+[node name="PanelVent21" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/LowerArm" unique_id=1764958872]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.24336)
+mesh = SubResource("ArmMesh_21")
+
+[node name="PanelVent22" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/LowerArm" unique_id=1602647891]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.12, 0.24336)
+mesh = SubResource("ArmMesh_22")
+
+[node name="ElbowPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1559764716]
+transform = Transform3D(-0.70710677, -0.70710677, 0, 0.70710677, -0.70710677, 0, 0, 0, 1, 0, 1.8, 0)
+
+[node name="UpperArm" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=96010901]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.7, 0)
+mesh = SubResource("ArmMesh_10")
+
+[node name="LinkEndCollar23" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/UpperArm" unique_id=1623437844]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.44, 0)
+mesh = SubResource("ArmMesh_23")
+
+[node name="RedLinkTrim24" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/UpperArm" unique_id=129213844]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.355, 0)
+mesh = SubResource("ArmMesh_24")
+
+[node name="LinkEndCollar25" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/UpperArm" unique_id=992289219]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.44, 0)
+mesh = SubResource("ArmMesh_25")
+
+[node name="RedLinkTrim26" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/UpperArm" unique_id=1799916260]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.355, 0)
+mesh = SubResource("ArmMesh_26")
+
+[node name="ServicePanel27" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/UpperArm" unique_id=595630434]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.204)
+mesh = SubResource("ArmMesh_27")
+
+[node name="PanelVent28" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/UpperArm" unique_id=1782114916]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.12, -0.21216)
+mesh = SubResource("ArmMesh_28")
+
+[node name="PanelVent29" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/UpperArm" unique_id=1703410113]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.21216)
+mesh = SubResource("ArmMesh_29")
+
+[node name="PanelVent30" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/UpperArm" unique_id=898232306]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.12, -0.21216)
+mesh = SubResource("ArmMesh_30")
+
+[node name="ServicePanel31" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/UpperArm" unique_id=1827957688]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.204)
+mesh = SubResource("ArmMesh_31")
+
+[node name="PanelVent32" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/UpperArm" unique_id=2123650105]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.12, 0.21216)
+mesh = SubResource("ArmMesh_32")
+
+[node name="PanelVent33" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/UpperArm" unique_id=1420046194]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.21216)
+mesh = SubResource("ArmMesh_33")
+
+[node name="PanelVent34" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/UpperArm" unique_id=2133562212]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.12, 0.21216)
+mesh = SubResource("ArmMesh_34")
+
+[node name="WristRollPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=664019285]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.4, 0)
+
+[node name="WristHousing" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot" unique_id=1452627223]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.15, 0)
+mesh = SubResource("ArmMesh_87")
+
+[node name="WristPitchPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot" unique_id=988670743]
+transform = Transform3D(0.25881904, -0.9659258, 0, 0.9659258, 0.25881904, 0, 0, 0, 1, 0, 0.3, 0)
+
+[node name="WristLink" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=782823059]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.2, 0)
+mesh = SubResource("ArmMesh_89")
+
+[node name="ToolRotationPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=2000052952]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.4, 0)
+
+[node name="GripperPlate" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot" unique_id=82362475]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.05, 0)
+mesh = SubResource("ArmMesh_91")
+
+[node name="SuctionCups" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate" unique_id=399015574]
+
+[node name="CupFrontLeft" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups" unique_id=2087609727]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.25, 0.11, -0.15)
+mesh = SubResource("ArmMesh_93")
+
+[node name="SuctionRim94" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups/CupFrontLeft" unique_id=1212819883]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.05, 0)
+mesh = SubResource("ArmMesh_94")
+
+[node name="CupFrontRight" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups" unique_id=23503689]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.25, 0.11, -0.15)
+mesh = SubResource("ArmMesh_95")
+
+[node name="SuctionRim96" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups/CupFrontRight" unique_id=382253883]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.05, 0)
+mesh = SubResource("ArmMesh_96")
+
+[node name="CupBackLeft" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups" unique_id=1662899821]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.25, 0.11, 0.15)
+mesh = SubResource("ArmMesh_97")
+
+[node name="SuctionRim98" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups/CupBackLeft" unique_id=971146694]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.05, 0)
+mesh = SubResource("ArmMesh_98")
+
+[node name="CupBackRight" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups" unique_id=1460399479]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.25, 0.11, 0.15)
+mesh = SubResource("ArmMesh_99")
+
+[node name="SuctionRim100" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/SuctionCups/CupBackRight" unique_id=686402951]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.05, 0)
+mesh = SubResource("ArmMesh_100")
+
+[node name="PickupPoint" type="Marker3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate" unique_id=1128918029]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.195, 0)
+
+[node name="GripperTopTrim" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate" unique_id=976563920]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.053, 0)
+mesh = SubResource("ArmMesh_92")
+
+[node name="ToolFlange" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot" unique_id=1004832055]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.025, 0)
+mesh = SubResource("ArmMesh_90")
+
+[node name="JointDrum69" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=2049408080]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0)
+mesh = SubResource("ArmMesh_69")
+
+[node name="JointRedCover70" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=446715540]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, -0.175)
+mesh = SubResource("ArmMesh_70")
+
+[node name="JointHub71" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=872505775]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, -0.205)
+mesh = SubResource("ArmMesh_71")
+
+[node name="JointBolt72" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=1790798837]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.1139, 0, -0.206)
+mesh = SubResource("ArmMesh_72")
+
+[node name="JointBolt73" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=1140579298]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.05695, 0.09864029, -0.206)
+mesh = SubResource("ArmMesh_73")
+
+[node name="JointBolt74" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=662650500]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.05695, 0.09864029, -0.206)
+mesh = SubResource("ArmMesh_74")
+
+[node name="JointBolt75" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=786774328]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.1139, 1.3948727e-17, -0.206)
+mesh = SubResource("ArmMesh_75")
+
+[node name="JointBolt76" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=1807191838]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.05695, -0.09864029, -0.206)
+mesh = SubResource("ArmMesh_76")
+
+[node name="JointBolt77" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=1247943457]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.05695, -0.09864029, -0.206)
+mesh = SubResource("ArmMesh_77")
+
+[node name="JointRedCover78" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=625643094]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0.175)
+mesh = SubResource("ArmMesh_78")
+
+[node name="JointHub79" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=19238031]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0.205)
+mesh = SubResource("ArmMesh_79")
+
+[node name="JointBolt80" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=1772592611]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.1139, 0, 0.206)
+mesh = SubResource("ArmMesh_80")
+
+[node name="JointBolt81" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=1049030896]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.05695, 0.09864029, 0.206)
+mesh = SubResource("ArmMesh_81")
+
+[node name="JointBolt82" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=761272576]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.05695, 0.09864029, 0.206)
+mesh = SubResource("ArmMesh_82")
+
+[node name="JointBolt83" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=1537041008]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.1139, 1.3948727e-17, 0.206)
+mesh = SubResource("ArmMesh_83")
+
+[node name="JointBolt84" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=1967682821]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.05695, -0.09864029, 0.206)
+mesh = SubResource("ArmMesh_84")
+
+[node name="JointBolt85" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=1868444751]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.05695, -0.09864029, 0.206)
+mesh = SubResource("ArmMesh_85")
+
+[node name="WristRollCollar" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot" unique_id=1945515657]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.04, 0)
+mesh = SubResource("ArmMesh_88")
+
+[node name="JointDrum52" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=13843043]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0)
+mesh = SubResource("ArmMesh_52")
+
+[node name="JointRedCover53" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=1669601753]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, -0.255)
+mesh = SubResource("ArmMesh_53")
+
+[node name="JointHub54" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=1908640199]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, -0.285)
+mesh = SubResource("ArmMesh_54")
+
+[node name="JointBolt55" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=802014900]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.1876, 0, -0.286)
+mesh = SubResource("ArmMesh_55")
+
+[node name="JointBolt56" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=1111629716]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.0938, 0.16246636, -0.286)
+mesh = SubResource("ArmMesh_56")
+
+[node name="JointBolt57" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=777613338]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.0938, 0.16246636, -0.286)
+mesh = SubResource("ArmMesh_57")
+
+[node name="JointBolt58" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=1657482265]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.1876, 2.2974374e-17, -0.286)
+mesh = SubResource("ArmMesh_58")
+
+[node name="JointBolt59" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=1389949882]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.0938, -0.16246636, -0.286)
+mesh = SubResource("ArmMesh_59")
+
+[node name="JointBolt60" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=1641101578]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.0938, -0.16246636, -0.286)
+mesh = SubResource("ArmMesh_60")
+
+[node name="JointRedCover61" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=1317860879]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0.255)
+mesh = SubResource("ArmMesh_61")
+
+[node name="JointHub62" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=1234493749]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0.285)
+mesh = SubResource("ArmMesh_62")
+
+[node name="JointBolt63" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=1311895900]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.1876, 0, 0.286)
+mesh = SubResource("ArmMesh_63")
+
+[node name="JointBolt64" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=170554495]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.0938, 0.16246636, 0.286)
+mesh = SubResource("ArmMesh_64")
+
+[node name="JointBolt65" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=1839261591]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.0938, 0.16246636, 0.286)
+mesh = SubResource("ArmMesh_65")
+
+[node name="JointBolt66" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=347224747]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.1876, 2.2974374e-17, 0.286)
+mesh = SubResource("ArmMesh_66")
+
+[node name="JointBolt67" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=1202551765]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.0938, -0.16246636, 0.286)
+mesh = SubResource("ArmMesh_67")
+
+[node name="JointBolt68" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=717138663]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.0938, -0.16246636, 0.286)
+mesh = SubResource("ArmMesh_68")
+
+[node name="ForearmNeck" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=898980347]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.3, 0)
+mesh = SubResource("ArmMesh_86")
+
+[node name="JointDrum35" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1705321214]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0)
+mesh = SubResource("ArmMesh_35")
+
+[node name="JointRedCover36" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=120209292]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, -0.295)
+mesh = SubResource("ArmMesh_36")
+
+[node name="JointHub37" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=287447639]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, -0.325)
+mesh = SubResource("ArmMesh_37")
+
+[node name="JointBolt38" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=538451583]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.2077, 0, -0.326)
+mesh = SubResource("ArmMesh_38")
+
+[node name="JointBolt39" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=66167669]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.10385, 0.17987348, -0.326)
+mesh = SubResource("ArmMesh_39")
+
+[node name="JointBolt40" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=74807798]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.10385, 0.17987348, -0.326)
+mesh = SubResource("ArmMesh_40")
+
+[node name="JointBolt41" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1623800643]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.2077, 2.5435915e-17, -0.326)
+mesh = SubResource("ArmMesh_41")
+
+[node name="JointBolt42" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1142615179]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.10385, -0.17987348, -0.326)
+mesh = SubResource("ArmMesh_42")
+
+[node name="JointBolt43" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1350231462]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.10385, -0.17987348, -0.326)
+mesh = SubResource("ArmMesh_43")
+
+[node name="JointRedCover44" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1341494777]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0.295)
+mesh = SubResource("ArmMesh_44")
+
+[node name="JointHub45" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1995838133]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0.325)
+mesh = SubResource("ArmMesh_45")
+
+[node name="JointBolt46" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=281490586]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.2077, 0, 0.326)
+mesh = SubResource("ArmMesh_46")
+
+[node name="JointBolt47" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1352026045]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.10385, 0.17987348, 0.326)
+mesh = SubResource("ArmMesh_47")
+
+[node name="JointBolt48" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=462430252]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.10385, 0.17987348, 0.326)
+mesh = SubResource("ArmMesh_48")
+
+[node name="JointBolt49" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=538537697]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.2077, 2.5435915e-17, 0.326)
+mesh = SubResource("ArmMesh_49")
+
+[node name="JointBolt50" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1138800905]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, -0.10385, -0.17987348, 0.326)
+mesh = SubResource("ArmMesh_50")
+
+[node name="JointBolt51" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=414092710]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0.10385, -0.17987348, 0.326)
+mesh = SubResource("ArmMesh_51")
+
+[node name="BaseTurntable" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot" unique_id=2045710890]
+mesh = SubResource("ArmMesh_4")
+
+[node name="BaseFoot" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase" unique_id=1340742836]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.25, 0)
+mesh = SubResource("ArmMesh_2")
+
+[node name="BaseTopRing" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase" unique_id=1927136952]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.23, 0)
+mesh = SubResource("ArmMesh_3")
+
+[node name="MountBolt5" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=1969827905]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.5, 0.115, -0.4)
+mesh = SubResource("ArmMesh_5")
+
+[node name="MountBolt6" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=1240037064]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.5, 0.115, 0.4)
+mesh = SubResource("ArmMesh_6")
+
+[node name="MountBolt7" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=1552308740]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5, 0.115, -0.4)
+mesh = SubResource("ArmMesh_7")
+
+[node name="MountBolt8" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=1769702254]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5, 0.115, 0.4)
+mesh = SubResource("ArmMesh_8")
+
+[node name="BearingBlockLB" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=1221060080]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.43, -0.102, -0.32)
+cast_shadow = 0
+mesh = SubResource("RailMesh_10")
+
+[node name="BearingSealLB" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=669045149]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.43, -0.102, -0.194)
+cast_shadow = 0
+mesh = SubResource("RailMesh_11")
+
+[node name="BearingBlockLF" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=774359971]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.43, -0.102, 0.32)
+cast_shadow = 0
+mesh = SubResource("RailMesh_10")
+
+[node name="BearingSealLF" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=545879328]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.43, -0.102, 0.446)
+cast_shadow = 0
+mesh = SubResource("RailMesh_11")
+
+[node name="BearingBlockRB" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=311313295]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.43, -0.102, -0.32)
+cast_shadow = 0
+mesh = SubResource("RailMesh_10")
+
+[node name="BearingSealRB" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=1024114]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.43, -0.102, -0.194)
+cast_shadow = 0
+mesh = SubResource("RailMesh_11")
+
+[node name="BearingBlockRF" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=1796341781]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.43, -0.102, 0.32)
+cast_shadow = 0
+mesh = SubResource("RailMesh_10")
+
+[node name="BearingSealRF" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=1605343605]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.43, -0.102, 0.446)
+cast_shadow = 0
+mesh = SubResource("RailMesh_11")
+
+[node name="CarriageSkirtFront" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=1186504352]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.035, 0.61)
+cast_shadow = 0
+mesh = SubResource("RailMesh_12")
+
+[node name="CarriageStripeFront" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=617663333]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.015, 0.634)
+cast_shadow = 0
+mesh = SubResource("RailMesh_13")
+
+[node name="CarriageSkirtRear" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=1766210845]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.035, -0.61)
+cast_shadow = 0
+mesh = SubResource("RailMesh_12")
+
+[node name="CarriageStripeRear" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=1248240792]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.015, -0.634)
+cast_shadow = 0
+mesh = SubResource("RailMesh_13")
+
+[node name="DriveHousing" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=973144665]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5, -0.04, 0.39)
+cast_shadow = 0
+mesh = SubResource("RailMesh_14")
+
+[node name="CableBracket" type="MeshInstance3D" parent="RobotSystem/Carriage" unique_id=1578733163]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.075, 0.74)
+cast_shadow = 0
+mesh = SubResource("RailMesh_15")
+
+[node name="CableServiceLoop" type="MultiMeshInstance3D" parent="RobotSystem/Carriage" unique_id=453573018]
+cast_shadow = 0
+multimesh = SubResource("RailBatch_CableServiceLoop")
+
+[node name="WorkPieces" type="Node3D" parent="." unique_id=911472083]
+
+[node name="Part01" type="Node3D" parent="WorkPieces" unique_id=1807876620]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1.075, -2.72)
+
+[node name="PartMesh" type="MeshInstance3D" parent="WorkPieces/Part01" unique_id=1579539128]
+mesh = SubResource("BoxMesh_nb4f5")
+
+[node name="ProcessTargets" type="Node3D" parent="." unique_id=791537972]
+
+[node name="LaserTarget" type="Marker3D" parent="ProcessTargets" unique_id=665142539]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1.075, -2.72)
+
+[node name="BenderTarget" type="Marker3D" parent="ProcessTargets" unique_id=623372664]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 1.1175, -1.94)
+
+[node name="WeldTarget" type="Marker3D" parent="ProcessTargets" unique_id=698792914]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 1.045, -2.68)
+
+[node name="InspectionTarget" type="Marker3D" parent="ProcessTargets" unique_id=1896907041]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7, 1.065, -3)
+
+[node name="OutputTarget" type="Marker3D" parent="ProcessTargets" unique_id=286428321]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 1.025, -3)
+
+[node name="OutputTable" type="MeshInstance3D" parent="." unique_id=1269974759]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 0.5, -3)
+mesh = SubResource("BoxMesh_tsdvb")
+
+[node name="OutputBody" type="StaticBody3D" parent="OutputTable" unique_id=1609746730]
+
+[node name="Outputcollision" type="CollisionShape3D" parent="OutputTable/OutputBody" unique_id=1401972268]
+shape = SubResource("BoxShape3D_keyo3")
+
+[node name="HMIConsole" type="Node3D" parent="." unique_id=2100746098]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 4.5)
+
+[node name="ConsoleStand" type="MeshInstance3D" parent="HMIConsole" unique_id=1785351684]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
+mesh = SubResource("BoxMesh_vnvhg")
+
+[node name="ScreenPanel" type="MeshInstance3D" parent="HMIConsole" unique_id=452751212]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.25, 0.34)
+material_override = SubResource("Mat_HMIDisplay")
+mesh = SubResource("BoxMesh_k8rwe")
+
+[node name="HMIStaticBody" type="StaticBody3D" parent="HMIConsole" unique_id=375410627 groups=["hmi_console"]]
+
+[node name="StandCollision" type="CollisionShape3D" parent="HMIConsole/HMIStaticBody" unique_id=1807292412]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
+shape = SubResource("BoxShape3D_y1mhp")
+
+[node name="ScreenCollision" type="CollisionShape3D" parent="HMIConsole/HMIStaticBody" unique_id=106359554]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.25, 0.34)
+shape = SubResource("BoxShape3D_br4io")
+
+[node name="FactoryLight" type="DirectionalLight3D" parent="." unique_id=1392512740]
+transform = Transform3D(0.8660254, 0.40957603, -0.28678823, 0, 0.57357645, 0.81915206, 0.5, -0.7094065, 0.49673176, 0, 0, 0)
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=555617718]
+environment = SubResource("Environment_xaprj")
+
+[node name="Player" type="CharacterBody3D" parent="." unique_id=1731048989]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.1, 6)
+script = ExtResource("2_xaprj")
+
+[node name="PlayerCollision" type="CollisionShape3D" parent="Player" unique_id=1324402168]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+shape = SubResource("CapsuleShape3D_qjjrk")
+
+[node name="Head" type="Node3D" parent="Player" unique_id=225673611]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
+
+[node name="Camera3D" type="Camera3D" parent="Player/Head" unique_id=410897771]
+current = true
+fov = 85.0
+
+[node name="InteractionRay" type="RayCast3D" parent="Player/Head/Camera3D" unique_id=559925569]
+target_position = Vector3(0, 0, -3)
+
+[node name="CellEnclosure" type="Node3D" parent="." unique_id=593197883]
+
+[node name="AccessGate" type="Node3D" parent="CellEnclosure" unique_id=1963733023]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 0, 2.5)
+script = SubResource("Script_CellGate")
+
+[node name="Slider" type="Node3D" parent="CellEnclosure/AccessGate" unique_id=65648897]
+
+[node name="GatePanel" type="Node3D" parent="CellEnclosure/AccessGate/Slider" unique_id=1721746359]
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/AccessGate/Slider/GatePanel" unique_id=1449827611]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_GatePanel")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/AccessGate/Slider/GatePanel" unique_id=1990353792]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/AccessGate/Slider/GatePanel" unique_id=897079886]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/AccessGate/Slider/GatePanel" unique_id=416345804]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/AccessGate/Slider/GatePanel" unique_id=1559676434]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/AccessGate/Slider/GatePanel" unique_id=2146664666]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/AccessGate/Slider/GatePanel/Body" unique_id=1637500074]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_GatePanel")
+
+[node name="Panel01" type="Node3D" parent="CellEnclosure" unique_id=379623361]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10.25, 0, 2.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel01" unique_id=1031669308]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel01")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel01" unique_id=198258984]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel01" unique_id=523537434]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel01" unique_id=925908307]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel01" unique_id=1234824940]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel01" unique_id=1243387752]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel01/Body" unique_id=751871126]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel01")
+
+[node name="Panel02" type="Node3D" parent="CellEnclosure" unique_id=1273248162]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -5.861111, 0, 2.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel02" unique_id=1249981806]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel02")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel02" unique_id=680157089]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel02" unique_id=841553808]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel02" unique_id=596450674]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel02" unique_id=1760827295]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel02" unique_id=2119974680]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel02/Body" unique_id=574688236]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel02")
+
+[node name="Panel03" type="Node3D" parent="CellEnclosure" unique_id=1581765235]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3.5833333, 0, 2.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel03" unique_id=1310778421]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel03")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel03" unique_id=721919030]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel03" unique_id=1267611745]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel03" unique_id=1874428544]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel03" unique_id=29842418]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel03" unique_id=2044109054]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel03/Body" unique_id=2093562973]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel03")
+
+[node name="Panel04" type="Node3D" parent="CellEnclosure" unique_id=1348907419]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.3055556, 0, 2.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel04" unique_id=815572]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel04")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel04" unique_id=1409725000]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel04" unique_id=295671355]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel04" unique_id=198353133]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel04" unique_id=1232825578]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel04" unique_id=1889939779]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel04/Body" unique_id=1417658761]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel04")
+
+[node name="Panel05" type="Node3D" parent="CellEnclosure" unique_id=1807912429]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.9722222, 0, 2.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel05" unique_id=1132293618]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel05")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel05" unique_id=371499917]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel05" unique_id=322298084]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel05" unique_id=1724085429]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel05" unique_id=267767387]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel05" unique_id=1582241523]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel05/Body" unique_id=570538464]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel05")
+
+[node name="Panel06" type="Node3D" parent="CellEnclosure" unique_id=1329383305]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3.25, 0, 2.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel06" unique_id=1913488380]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel06")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel06" unique_id=1081388993]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel06" unique_id=1485147396]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel06" unique_id=601234483]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel06" unique_id=1400543195]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel06" unique_id=1020940141]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel06/Body" unique_id=840647778]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel06")
+
+[node name="Panel07" type="Node3D" parent="CellEnclosure" unique_id=1152431189]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5.5277777, 0, 2.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel07" unique_id=1601047463]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel07")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel07" unique_id=911718788]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel07" unique_id=1021871605]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel07" unique_id=1171255527]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel07" unique_id=599885290]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel07" unique_id=1680102845]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel07/Body" unique_id=424843896]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel07")
+
+[node name="Panel08" type="Node3D" parent="CellEnclosure" unique_id=1569489195]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7.8055553, 0, 2.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel08" unique_id=1071651266]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel08")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel08" unique_id=851303513]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel08" unique_id=997591953]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel08" unique_id=387865688]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel08" unique_id=2012045823]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel08" unique_id=2005365505]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel08/Body" unique_id=1301850124]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel08")
+
+[node name="Panel09" type="Node3D" parent="CellEnclosure" unique_id=1050075763]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10.083333, 0, 2.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel09" unique_id=1038261972]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel09")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel09" unique_id=1077843821]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel09" unique_id=1642142430]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel09" unique_id=1003242577]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel09" unique_id=1652136783]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel09" unique_id=507232163]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel09/Body" unique_id=97451482]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel09")
+
+[node name="Panel10" type="Node3D" parent="CellEnclosure" unique_id=816286069]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12.361111, 0, 2.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel10" unique_id=2007242683]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel10")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel10" unique_id=1281590095]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel10" unique_id=599158753]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.1388888, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel10" unique_id=1574547055]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel10" unique_id=1334809931]
+transform = Transform3D(2.2777777, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel10" unique_id=1482213111]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel10/Body" unique_id=2135356110]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel10")
+
+[node name="Panel11" type="Node3D" parent="CellEnclosure" unique_id=630892417]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10.25, 0, -5.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel11" unique_id=1528613388]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel11")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel11" unique_id=837525627]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel11" unique_id=1552611044]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel11" unique_id=1516975347]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel11" unique_id=14664803]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel11" unique_id=452771343]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel11/Body" unique_id=218660980]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel11")
+
+[node name="Panel12" type="Node3D" parent="CellEnclosure" unique_id=103268628]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -7.75, 0, -5.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel12" unique_id=1599806764]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel12")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel12" unique_id=2021087385]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel12" unique_id=1886191849]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel12" unique_id=784537735]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel12" unique_id=1080489028]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel12" unique_id=514784636]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel12/Body" unique_id=831921703]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel12")
+
+[node name="Panel13" type="Node3D" parent="CellEnclosure" unique_id=143185662]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -5.25, 0, -5.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel13" unique_id=1658758244]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel13")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel13" unique_id=496208784]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel13" unique_id=1045577714]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel13" unique_id=537230047]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel13" unique_id=1982949170]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel13" unique_id=2126398998]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel13/Body" unique_id=1016660002]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel13")
+
+[node name="Panel14" type="Node3D" parent="CellEnclosure" unique_id=1174150667]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.75, 0, -5.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel14" unique_id=1212935075]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel14")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel14" unique_id=1903264230]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel14" unique_id=898887877]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel14" unique_id=625271848]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel14" unique_id=483046329]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel14" unique_id=1769877724]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel14/Body" unique_id=1516282200]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel14")
+
+[node name="Panel15" type="Node3D" parent="CellEnclosure" unique_id=1625654190]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.25, 0, -5.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel15" unique_id=1911195805]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel15")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel15" unique_id=1817725661]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel15" unique_id=834424522]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel15" unique_id=1438101890]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel15" unique_id=1499296076]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel15" unique_id=216439622]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel15/Body" unique_id=964105482]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel15")
+
+[node name="Panel16" type="Node3D" parent="CellEnclosure" unique_id=105595526]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.25, 0, -5.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel16" unique_id=2116381935]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel16")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel16" unique_id=339526465]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel16" unique_id=1848370371]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel16" unique_id=1847831113]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel16" unique_id=537488494]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel16" unique_id=1326631713]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel16/Body" unique_id=1401676598]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel16")
+
+[node name="Panel17" type="Node3D" parent="CellEnclosure" unique_id=1981947209]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.75, 0, -5.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel17" unique_id=121504562]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel17")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel17" unique_id=142354606]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel17" unique_id=1374266930]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel17" unique_id=1259750917]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel17" unique_id=1067048015]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel17" unique_id=1408966685]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel17/Body" unique_id=1186808671]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel17")
+
+[node name="Panel18" type="Node3D" parent="CellEnclosure" unique_id=1824663858]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7.25, 0, -5.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel18" unique_id=932193888]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel18")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel18" unique_id=1531214620]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel18" unique_id=1323279700]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel18" unique_id=1383955128]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel18" unique_id=1122624310]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel18" unique_id=1948823722]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel18/Body" unique_id=1294320200]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel18")
+
+[node name="Panel19" type="Node3D" parent="CellEnclosure" unique_id=1911720916]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 9.75, 0, -5.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel19" unique_id=1629307938]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel19")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel19" unique_id=1695460203]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel19" unique_id=1093181711]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel19" unique_id=2003833391]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel19" unique_id=872719170]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel19" unique_id=249680722]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel19/Body" unique_id=862939894]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel19")
+
+[node name="Panel20" type="Node3D" parent="CellEnclosure" unique_id=389032159]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12.25, 0, -5.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel20" unique_id=79945507]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel20")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel20" unique_id=606769456]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel20" unique_id=1551785341]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.25, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel20" unique_id=2079077902]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel20" unique_id=1119110636]
+transform = Transform3D(2.5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel20" unique_id=1489787667]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel20/Body" unique_id=1360100459]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel20")
+
+[node name="Panel21" type="Node3D" parent="CellEnclosure" unique_id=1429194690]
+transform = Transform3D(-4.371139e-08, 0, 1, 0, 1, 0, -1, 0, -4.371139e-08, -11.5, 0, -4.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel21" unique_id=1763315381]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel21")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel21" unique_id=213561103]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel21" unique_id=1678153781]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel21" unique_id=5157590]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel21" unique_id=1648179717]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel21" unique_id=1876988026]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel21/Body" unique_id=20516608]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel21")
+
+[node name="Panel22" type="Node3D" parent="CellEnclosure" unique_id=1073901108]
+transform = Transform3D(-4.371139e-08, 0, 1, 0, 1, 0, -1, 0, -4.371139e-08, -11.5, 0, -2.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel22" unique_id=1922344766]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel22")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel22" unique_id=482609630]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel22" unique_id=1552490137]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel22" unique_id=1331399387]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel22" unique_id=161716558]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel22" unique_id=1501556651]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel22/Body" unique_id=1412303413]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel22")
+
+[node name="Panel23" type="Node3D" parent="CellEnclosure" unique_id=1746132410]
+transform = Transform3D(-4.371139e-08, 0, 1, 0, 1, 0, -1, 0, -4.371139e-08, -11.5, 0, -0.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel23" unique_id=1774426941]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel23")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel23" unique_id=511376999]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel23" unique_id=65408473]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel23" unique_id=1121288435]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel23" unique_id=1991515038]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel23" unique_id=580817898]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel23/Body" unique_id=1140807106]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel23")
+
+[node name="Panel24" type="Node3D" parent="CellEnclosure" unique_id=2027884913]
+transform = Transform3D(-4.371139e-08, 0, 1, 0, 1, 0, -1, 0, -4.371139e-08, -11.5, 0, 1.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel24" unique_id=967170290]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel24")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel24" unique_id=2088212902]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel24" unique_id=703786410]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel24" unique_id=1254362544]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel24" unique_id=1888246292]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel24" unique_id=1813688943]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel24/Body" unique_id=554000707]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel24")
+
+[node name="Panel25" type="Node3D" parent="CellEnclosure" unique_id=1249514104]
+transform = Transform3D(-4.371139e-08, 0, 1, 0, 1, 0, -1, 0, -4.371139e-08, 13.5, 0, -4.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel25" unique_id=1088602275]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel25")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel25" unique_id=441793463]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel25" unique_id=672543271]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel25" unique_id=653827817]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel25" unique_id=999473160]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel25" unique_id=916806073]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel25/Body" unique_id=601956891]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel25")
+
+[node name="Panel26" type="Node3D" parent="CellEnclosure" unique_id=2042774138]
+transform = Transform3D(-4.371139e-08, 0, 1, 0, 1, 0, -1, 0, -4.371139e-08, 13.5, 0, -2.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel26" unique_id=1445414281]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel26")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel26" unique_id=123756790]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel26" unique_id=1608712815]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel26" unique_id=1674743250]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel26" unique_id=295645104]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel26" unique_id=2080874162]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel26/Body" unique_id=1376148709]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel26")
+
+[node name="Panel27" type="Node3D" parent="CellEnclosure" unique_id=469367577]
+transform = Transform3D(-4.371139e-08, 0, 1, 0, 1, 0, -1, 0, -4.371139e-08, 13.5, 0, -0.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel27" unique_id=495716401]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel27")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel27" unique_id=155508212]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel27" unique_id=1145362409]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel27" unique_id=496522339]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel27" unique_id=1758520696]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel27" unique_id=309767684]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel27/Body" unique_id=1872885964]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel27")
+
+[node name="Panel28" type="Node3D" parent="CellEnclosure" unique_id=193865245]
+transform = Transform3D(-4.371139e-08, 0, 1, 0, 1, 0, -1, 0, -4.371139e-08, 13.5, 0, 1.5)
+
+[node name="Mesh" type="MultiMeshInstance3D" parent="CellEnclosure/Panel28" unique_id=458865731]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+cast_shadow = 0
+multimesh = SubResource("Mesh_Fence_Panel28")
+
+[node name="LeftPost" type="MeshInstance3D" parent="CellEnclosure/Panel28" unique_id=596889806]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="RightPost" type="MeshInstance3D" parent="CellEnclosure/Panel28" unique_id=1245964310]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1.15, 0)
+mesh = SubResource("Mesh_FencePost")
+
+[node name="BottomFrame" type="MeshInstance3D" parent="CellEnclosure/Panel28" unique_id=679495134]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.09, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="TopFrame" type="MeshInstance3D" parent="CellEnclosure/Panel28" unique_id=627170346]
+transform = Transform3D(2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.21, 0)
+mesh = SubResource("Mesh_FenceFrame")
+
+[node name="Body" type="StaticBody3D" parent="CellEnclosure/Panel28" unique_id=399179817]
+
+[node name="Collision" type="CollisionShape3D" parent="CellEnclosure/Panel28/Body" unique_id=6410699]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.15, 0)
+shape = SubResource("Shape_Fence_Panel28")
+
+[node name="StripeFrontLeft" type="MeshInstance3D" parent="CellEnclosure" unique_id=34504940]
+transform = Transform3D(2.25, 0, 0, 0, 1, 0, 0, 0, 1, -10.125, 0.007, 2.2)
+mesh = SubResource("Mesh_CellStripe")
+
+[node name="StripeFrontRight" type="MeshInstance3D" parent="CellEnclosure" unique_id=1465284058]
+transform = Transform3D(19.75, 0, 0, 0, 1, 0, 0, 0, 1, 3.125, 0.007, 2.2)
+mesh = SubResource("Mesh_CellStripe")
+
+[node name="StripeRear" type="MeshInstance3D" parent="CellEnclosure" unique_id=918470329]
+transform = Transform3D(24.4, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0.007, -5.2)
+mesh = SubResource("Mesh_CellStripe")
+
+[node name="StripeLeft" type="MeshInstance3D" parent="CellEnclosure" unique_id=133874562]
+transform = Transform3D(-3.2346426e-07, 0, 1, 0, 1, 0, -7.4, 0, -4.371139e-08, -11.2, 0.007, -1.5)
+mesh = SubResource("Mesh_CellStripe")
+
+[node name="StripeRight" type="MeshInstance3D" parent="CellEnclosure" unique_id=1147671981]
+transform = Transform3D(-3.2346426e-07, 0, 1, 0, 1, 0, -7.4, 0, -4.371139e-08, 13.2, 0.007, -1.5)
+mesh = SubResource("Mesh_CellStripe")
+
+[node name="CellHUD" type="CanvasLayer" parent="." unique_id=443485207]
+
+[node name="Status" type="Label" parent="CellHUD" unique_id=291300840]
+offset_left = 20.0
+offset_top = 20.0
+offset_right = 850.0
+offset_bottom = 100.0
+theme_override_colors/font_color = Color(1, 0.92, 0.65, 1)
+theme_override_colors/font_shadow_color = Color(0, 0, 0, 1)
+theme_override_constants/shadow_offset_x = 2
+theme_override_constants/shadow_offset_y = 2
+theme_override_font_sizes/font_size = 18
+text = "ROBOT CELL"
+
+[node name="HMISystem" type="Node" parent="." unique_id=784979550]
+script = SubResource("Script_CellHMI")
