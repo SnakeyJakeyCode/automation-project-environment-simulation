@@ -1,4 +1,4 @@
-[gd_scene format=3 uid="uid://ohvceihbp7n5"]
+[gd_scene format=3 uid="uid://b3cmi5jyon8t1"]
 
 [ext_resource type="PackedScene" uid="uid://bjoefar384f5w" path="res://assets/machines/Cutter_LaserBed.glb" id="1_br4io"]
 [ext_resource type="PackedScene" uid="uid://dqhwote23yjqr" path="res://assets/machines/Bender_PressBrake.glb" id="1_keyo3"]

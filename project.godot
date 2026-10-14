@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Automation Project Environment Simulation"
-run/main_scene="uid://ohvceihbp7n5"
+run/main_scene="uid://qg75o8mw4awa"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
 

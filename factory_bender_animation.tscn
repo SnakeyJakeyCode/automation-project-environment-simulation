@@ -1,4 +1,4 @@
-[gd_scene format=3 uid="uid://cgvjxjjjjq4y7"]
+[gd_scene format=3 uid="uid://qg75o8mw4awa"]
 
 [ext_resource type="PackedScene" uid="uid://bjoefar384f5w" path="res://assets/machines/Cutter_LaserBed.glb" id="1_br4io"]
 [ext_resource type="PackedScene" uid="uid://dqhwote23yjqr" path="res://assets/machines/Bender_PressBrake.glb" id="1_keyo3"]
@@ -50,7 +50,495 @@ material = SubResource("Mat_InspectionDark")
 size = Vector3(0.16, 0.96, 0.16)
 
 [sub_resource type="GDScript" id="GDScript_AlignedRobot"]
-script/source = "extends Node3D\n\nsignal status_changed(message: String)\n\n\n\n\n# Robot joint poses. Angles are in degrees.\n# Folded park pose: tool down, tucked above the carriage.\nconst POSE_HOME: Dictionary = {\n\t\"base_y\": 90.0,\n\t\"shoulder_z\": 30.0,\n\t\"elbow_z\": -135.0,\n\t\"wrist_roll_y\": 0.0,\n\t\"wrist_pitch_z\": -75.0,\n\t\"tool_rotation_y\": 0.0\n}\n\nconst POSE_CARRY: Dictionary = {\n\t\"base_y\": 90.0,\n\t\"shoulder_z\": -15.0,\n\t\"elbow_z\": -30.0,\n\t\"wrist_roll_y\": 0.0,\n\t\"wrist_pitch_z\": -135.0,\n\t\"tool_rotation_y\": 0.0\n}\n\n\n\n# Motion and presentation settings.\n@export var rail_speed: float = 2.5\n@export var joint_move_duration: float = 1.5\n@export var suction_pause: float = 0.4\n@export var heartbeat_flashes: int = 4\n@export var heartbeat_interval: float = 0.25\n@export var part_attach_offset_y: float = 0.025\n@export var approach_clearance: float = 0.25\n\n# These switches represent the routing choices made by the CODESYS logic.\n@export var part_id: int = 1\n@export var use_bender: bool = true\n@export var use_welder: bool = true\n@export var use_inspection: bool = true\n\n\n# Robot hierarchy.\n@onready var carriage: Node3D = $Carriage\n@onready var base_pivot: Node3D = $Carriage/RobotBase/BasePivot\n@onready var shoulder_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot\n@onready var elbow_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot\n@onready var wrist_roll_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot\n@onready var wrist_pitch_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot\n@onready var tool_rotation_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot\n@onready var pickup_point: Marker3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/PickupPoint\n\n# Workpiece and process targets.\n@onready var workpieces: Node3D = $\"../WorkPieces\"\n@onready var part: Node3D = $\"../WorkPieces/Part01\"\n@onready var laser_target: Marker3D = $\"../ProcessTargets/LaserTarget\"\n@onready var bender_target: Marker3D = $\"../ProcessTargets/BenderTarget\"\n@onready var weld_target: Marker3D = $\"../ProcessTargets/WeldTarget\"\n@onready var inspection_target: Marker3D = $\"../ProcessTargets/InspectionTarget\"\n@onready var output_target: Marker3D = $\"../ProcessTargets/OutputTarget\"\n\n# Existing station heartbeat meshes.\n@onready var laser_light: Node3D = $\"../LaserCutter/HeartbeatLight\"\n@onready var bender_light: Node3D = $\"../Bender/HeartbeatLight2\"\n@onready var weld_light: Node3D = $\"../WeldCell/HeartbeatLight3\"\n@onready var inspection_light: Node3D = $\"../Inspection/HeartbeatLight4\"\n\n\nvar animation_running: bool = false\n\n\nfunc _ready() -> void:\n\treset_demo_state()\n\n\nfunc _unhandled_input(event: InputEvent) -> void:\n\tif event.is_action_pressed(\"run_demo\") and not animation_running:\n\t\trun_factory_demo()\n\n\n# Complete Cutter -> Bender -> Welder -> Inspection -> Output demonstration.\nfunc run_factory_demo() -> void:\n\tif animation_running:\n\t\treturn\n\tvar gate: Node = get_node(\"../CellEnclosure/AccessGate\")\n\tvar blocked: String = str(gate.call(\"cycle_block_reason\"))\n\tif not blocked.is_empty():\n\t\tset_status(blocked)\n\t\treturn\n\tanimation_running = true\n\treset_demo_state()\n\n\tawait wait_seconds(0.5)\n\n\tset_status(\"Part %d: laser cutting\" % part_id)\n\tawait run_station_process(\"Laser cutter\", laser_light)\n\tif not (await pick_current_part()):\n\t\tabort_demo()\n\t\treturn\n\n\tif use_bender:\n\t\tif not (await visit_station(bender_target, bender_light, \"Bender\")):\n\t\t\tabort_demo()\n\t\t\treturn\n\n\tif use_welder:\n\t\tif not (await visit_station(weld_target, weld_light, \"Welder\")):\n\t\t\tabort_demo()\n\t\t\treturn\n\n\tif use_inspection:\n\t\tif not (await visit_station(inspection_target, inspection_light, \"Inspection\")):\n\t\t\tabort_demo()\n\t\t\treturn\n\n\tset_status(\"Moving part %d to output\" % part_id)\n\tawait move_carriage_to(to_local(output_target.global_position).x)\n\tif not (await place_part_at(output_target)):\n\t\tabort_demo()\n\t\treturn\n\tawait move_to_pose(POSE_HOME)\n\n\tset_all_lights(false)\n\tset_status(\"Part %d complete\" % part_id)\n\tanimation_running = false\n\n\n# Visits one optional processing station and collects the part again afterward.\nfunc visit_station(\n\ttarget: Marker3D,\n\theartbeat_light: Node3D,\n\tstation_name: String\n) -> bool:\n\tset_status(\"Moving part %d to %s\" % [part_id, station_name])\n\tawait move_carriage_to(to_local(target.global_position).x)\n\tif not (await place_part_at(target)):\n\t\treturn false\n\tawait run_station_process(station_name, heartbeat_light)\n\treturn await pick_current_part()\n\n\n# Solve each pickup from the current part/marker, using this arm's actual link lengths.\nfunc pose_for_position(world_position: Vector3) -> Dictionary:\n\tvar local_position: Vector3 = carriage.to_local(world_position)\n\tvar shoulder_origin: Vector3 = carriage.to_local(shoulder_pivot.global_position)\n\tvar delta: Vector3 = local_position - shoulder_origin\n\tvar reach: float = Vector2(delta.x, delta.z).length()\n\tvar lower_length: float = elbow_pivot.position.y\n\tvar upper_length: float = wrist_roll_pivot.position.y + wrist_pitch_pivot.position.y\n\tvar tool_drop: float = tool_rotation_pivot.position.y + (pickup_point.get_parent() as Node3D).position.y\n\ttool_drop += pickup_point.position.y + part_attach_offset_y\n\tvar wrist_height: float = delta.y + tool_drop\n\tvar distance: float = Vector2(reach, wrist_height).length()\n\tif distance > lower_length + upper_length or distance < absf(lower_length - upper_length):\n\t\tpush_error(\"Target is outside the robot workspace: %s\" % world_position)\n\t\treturn {}\n\tvar elbow_cos: float = (distance * distance - lower_length * lower_length - upper_length * upper_length)\n\telbow_cos /= 2.0 * lower_length * upper_length\n\tvar elbow_angle: float = -acos(clampf(elbow_cos, -1.0, 1.0))\n\tvar shoulder_angle: float = atan2(wrist_height, reach)\n\tshoulder_angle -= atan2(upper_length * sin(elbow_angle), lower_length + upper_length * cos(elbow_angle))\n\tshoulder_angle -= PI / 2.0\n\treturn {\n\t\t\"base_y\": rad_to_deg(atan2(-delta.z, delta.x)),\n\t\t\"shoulder_z\": rad_to_deg(shoulder_angle),\n\t\t\"elbow_z\": rad_to_deg(elbow_angle),\n\t\t\"wrist_roll_y\": 0.0,\n\t\t\"wrist_pitch_z\": -180.0 - rad_to_deg(shoulder_angle + elbow_angle),\n\t\t\"tool_rotation_y\": 0.0\n\t}\n\n\nfunc pick_current_part() -> bool:\n\tset_status(\"Robot collecting part %d\" % part_id)\n\tvar position_to_pick: Vector3 = part.global_position\n\tvar approach_pose: Dictionary = pose_for_position(position_to_pick + Vector3.UP * approach_clearance)\n\tvar contact_pose: Dictionary = pose_for_position(position_to_pick)\n\tif approach_pose.is_empty() or contact_pose.is_empty():\n\t\tset_status(\"Target is outside the robot workspace\")\n\t\treturn false\n\tawait move_to_pose(approach_pose)\n\tawait move_to_pose(contact_pose, joint_move_duration * 0.5)\n\tawait wait_seconds(suction_pause)\n\tattach_part_to_tool()\n\tawait wait_seconds(suction_pause)\n\tawait move_to_pose(approach_pose, joint_move_duration * 0.5)\n\tawait move_to_pose(POSE_CARRY)\n\treturn true\n\n\nfunc place_part_at(target: Marker3D) -> bool:\n\tset_status(\"Robot placing part %d\" % part_id)\n\tvar approach_pose: Dictionary = pose_for_position(target.global_position + Vector3.UP * approach_clearance)\n\tvar contact_pose: Dictionary = pose_for_position(target.global_position)\n\tif approach_pose.is_empty() or contact_pose.is_empty():\n\t\tset_status(\"Target is outside the robot workspace\")\n\t\treturn false\n\tawait move_to_pose(approach_pose)\n\tawait move_to_pose(contact_pose, joint_move_duration * 0.5)\n\tawait wait_seconds(suction_pause)\n\trelease_part_at(target)\n\tawait wait_seconds(suction_pause)\n\tawait move_to_pose(approach_pose, joint_move_duration * 0.5)\n\tawait move_to_pose(POSE_CARRY)\n\treturn true\n\n\n# Reparenting makes the workpiece follow the moving tool.\nfunc attach_part_to_tool() -> void:\n\tif part.get_parent() != pickup_point:\n\t\tpart.reparent(pickup_point, true)\n\n\n\n# The target marker provides the exact staged placement at each machine.\nfunc release_part_at(target: Marker3D) -> void:\n\tif part.get_parent() != workpieces:\n\t\tpart.reparent(workpieces, false)\n\n\tpart.global_transform = target.global_transform\n\n\nfunc move_carriage_to(target_x: float) -> void:\n\tif is_equal_approx(carriage.position.x, target_x):\n\t\treturn\n\n\tvar safe_speed: float = maxf(rail_speed, 0.01)\n\tvar distance: float = absf(carriage.position.x - target_x)\n\tvar duration: float = distance / safe_speed\n\tvar tween: Tween = create_tween()\n\n\ttween.set_trans(Tween.TRANS_SINE)\n\ttween.set_ease(Tween.EASE_IN_OUT)\n\ttween.tween_property(carriage, \"position:x\", target_x, duration)\n\n\tawait tween.finished\n\n\nfunc move_to_pose(pose: Dictionary, duration: float = -1.0) -> void:\n\tvar actual_duration: float = duration\n\tif actual_duration < 0.0:\n\t\tactual_duration = joint_move_duration\n\n\tawait move_robot_to(\n\t\tfloat(pose[\"base_y\"]),\n\t\tfloat(pose[\"shoulder_z\"]),\n\t\tfloat(pose[\"elbow_z\"]),\n\t\tfloat(pose[\"wrist_roll_y\"]),\n\t\tfloat(pose[\"wrist_pitch_z\"]),\n\t\tfloat(pose[\"tool_rotation_y\"]),\n\t\tactual_duration\n\t)\n\n\nfunc move_robot_to(\n\tbase_y: float,\n\tshoulder_z: float,\n\telbow_z: float,\n\twrist_roll_y: float,\n\twrist_pitch_z: float,\n\ttool_rotation_y: float,\n\tduration: float\n) -> void:\n\tvar tween: Tween = create_tween()\n\n\ttween.set_parallel(true)\n\ttween.set_trans(Tween.TRANS_SINE)\n\ttween.set_ease(Tween.EASE_IN_OUT)\n\n\ttween.tween_property(base_pivot, \"rotation_degrees:y\", base_y, duration)\n\ttween.tween_property(shoulder_pivot, \"rotation_degrees:z\", shoulder_z, duration)\n\ttween.tween_property(elbow_pivot, \"rotation_degrees:z\", elbow_z, duration)\n\ttween.tween_property(wrist_roll_pivot, \"rotation_degrees:y\", wrist_roll_y, duration)\n\ttween.tween_property(wrist_pitch_pivot, \"rotation_degrees:z\", wrist_pitch_z, duration)\n\ttween.tween_property(tool_rotation_pivot, \"rotation_degrees:y\", tool_rotation_y, duration)\n\n\tawait tween.finished\n\n\n# Blinks the existing heartbeat mesh while a station is processing the part.\nfunc run_station_process(station_name: String, heartbeat_light: Node3D) -> void:\n\tset_status(\"%s processing part %d\" % [station_name, part_id])\n\n\tfor _flash_index in range(heartbeat_flashes):\n\t\theartbeat_light.visible = true\n\t\tawait wait_seconds(heartbeat_interval)\n\t\theartbeat_light.visible = false\n\t\tawait wait_seconds(heartbeat_interval)\n\n\nfunc reset_demo_state() -> void:\n\tif part.get_parent() != workpieces:\n\t\tpart.reparent(workpieces, false)\n\n\tpart.global_transform = laser_target.global_transform\n\tcarriage.position.x = to_local(laser_target.global_position).x\n\tapply_pose_immediately(POSE_HOME)\n\tset_all_lights(false)\n\tset_status(\"Part %d ready at laser cutter\" % part_id)\n\n\nfunc apply_pose_immediately(pose: Dictionary) -> void:\n\tbase_pivot.rotation_degrees = Vector3(\n\t\t0.0,\n\t\tfloat(pose[\"base_y\"]),\n\t\t0.0\n\t)\n\tshoulder_pivot.rotation_degrees = Vector3(\n\t\t0.0,\n\t\t0.0,\n\t\tfloat(pose[\"shoulder_z\"])\n\t)\n\telbow_pivot.rotation_degrees = Vector3(\n\t\t0.0,\n\t\t0.0,\n\t\tfloat(pose[\"elbow_z\"])\n\t)\n\twrist_roll_pivot.rotation_degrees = Vector3(\n\t\t0.0,\n\t\tfloat(pose[\"wrist_roll_y\"]),\n\t\t0.0\n\t)\n\twrist_pitch_pivot.rotation_degrees = Vector3(\n\t\t0.0,\n\t\t0.0,\n\t\tfloat(pose[\"wrist_pitch_z\"])\n\t)\n\ttool_rotation_pivot.rotation_degrees = Vector3(\n\t\t0.0,\n\t\tfloat(pose[\"tool_rotation_y\"]),\n\t\t0.0\n\t)\n\n\nfunc set_all_lights(is_visible: bool) -> void:\n\tlaser_light.visible = is_visible\n\tbender_light.visible = is_visible\n\tweld_light.visible = is_visible\n\tinspection_light.visible = is_visible\n\n\nfunc set_status(message: String) -> void:\n\tprint(message)\n\tstatus_changed.emit(message)\n\n\nfunc wait_seconds(seconds: float) -> void:\n\tawait get_tree().create_timer(seconds).timeout\n\n\nfunc abort_demo() -> void:\n\tset_all_lights(false)\n\tanimation_running = false\n\tset_status(\"Demo stopped: unreachable pickup or placement target\")\n"
+script/source = "extends Node3D
+
+signal status_changed(message: String)
+
+
+
+
+# Robot joint poses. Angles are in degrees.
+# Folded park pose: tool down, tucked above the carriage.
+const POSE_HOME: Dictionary = {
+	\"base_y\": 90.0,
+	\"shoulder_z\": 30.0,
+	\"elbow_z\": -135.0,
+	\"wrist_roll_y\": 0.0,
+	\"wrist_pitch_z\": -75.0,
+	\"tool_rotation_y\": 0.0
+}
+
+const POSE_CARRY: Dictionary = {
+	\"base_y\": 90.0,
+	\"shoulder_z\": -15.0,
+	\"elbow_z\": -30.0,
+	\"wrist_roll_y\": 0.0,
+	\"wrist_pitch_z\": -135.0,
+	\"tool_rotation_y\": 0.0
+}
+
+
+
+# Motion and presentation settings.
+@export var rail_speed: float = 2.5
+@export var joint_move_duration: float = 1.5
+@export var suction_pause: float = 0.4
+@export var heartbeat_flashes: int = 4
+@export var heartbeat_interval: float = 0.25
+@export var part_attach_offset_y: float = 0.025
+@export var approach_clearance: float = 0.25
+
+# These switches represent the routing choices made by the CODESYS logic.
+@export var part_id: int = 1
+@export var use_bender: bool = true
+@export var use_welder: bool = true
+@export var use_inspection: bool = true
+
+
+# Robot hierarchy.
+@onready var carriage: Node3D = $Carriage
+@onready var base_pivot: Node3D = $Carriage/RobotBase/BasePivot
+@onready var shoulder_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot
+@onready var elbow_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot
+@onready var wrist_roll_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot
+@onready var wrist_pitch_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot
+@onready var tool_rotation_pivot: Node3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot
+@onready var pickup_point: Marker3D = $Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot/ToolRotationPivot/GripperPlate/PickupPoint
+
+# Workpiece and process targets.
+@onready var workpieces: Node3D = $\"../WorkPieces\"
+@onready var part: Node3D = $\"../WorkPieces/Part01\"
+@onready var laser_target: Marker3D = $\"../ProcessTargets/LaserTarget\"
+@onready var bender_target: Marker3D = $\"../ProcessTargets/BenderTarget\"
+@onready var weld_target: Marker3D = $\"../ProcessTargets/WeldTarget\"
+@onready var inspection_target: Marker3D = $\"../ProcessTargets/InspectionTarget\"
+@onready var output_target: Marker3D = $\"../ProcessTargets/OutputTarget\"
+
+# Existing station heartbeat meshes.
+@onready var laser_light: Node3D = $\"../LaserCutter/HeartbeatLight\"
+@onready var bender_light: Node3D = $\"../Bender/HeartbeatLight2\"
+@onready var weld_light: Node3D = $\"../WeldCell/HeartbeatLight3\"
+@onready var inspection_light: Node3D = $\"../Inspection/HeartbeatLight4\"
+
+
+var animation_running: bool = false
+
+
+func _ready() -> void:
+	initialize_bender_animation()
+	reset_demo_state()
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed(\"run_demo\") and not animation_running:
+		run_factory_demo()
+
+
+# Complete Cutter -> Bender -> Welder -> Inspection -> Output demonstration.
+func run_factory_demo() -> void:
+	if animation_running:
+		return
+	var hmi: Node = get_node(\"../HMISystem\")
+	var connection_block: String = str(hmi.call(\"cycle_block_reason\"))
+	if not connection_block.is_empty():
+		set_status(connection_block)
+		return
+	var gate: Node = get_node(\"../CellEnclosure/AccessGate\")
+	var blocked: String = str(gate.call(\"cycle_block_reason\"))
+	if not blocked.is_empty():
+		set_status(blocked)
+		return
+	animation_running = true
+	reset_demo_state()
+
+	await wait_seconds(0.5)
+
+	set_status(\"Part %d: laser cutting\" % part_id)
+	await run_station_process(\"Laser cutter\", laser_light)
+	if not (await pick_current_part()):
+		abort_demo()
+		return
+
+	if use_bender:
+		if not (await visit_bender()):
+			abort_demo()
+			return
+
+	if use_welder:
+		if not (await visit_station(weld_target, weld_light, \"Welder\")):
+			abort_demo()
+			return
+
+	if use_inspection:
+		if not (await visit_station(inspection_target, inspection_light, \"Inspection\")):
+			abort_demo()
+			return
+
+	set_status(\"Moving part %d to output\" % part_id)
+	await move_carriage_to(to_local(output_target.global_position).x)
+	if not (await place_part_at(output_target)):
+		abort_demo()
+		return
+	await move_to_pose(POSE_HOME)
+
+	set_all_lights(false)
+	set_status(\"Part %d complete\" % part_id)
+	animation_running = false
+
+
+# Visits one optional processing station and collects the part again afterward.
+func visit_station(
+	target: Marker3D,
+	heartbeat_light: Node3D,
+	station_name: String
+) -> bool:
+	set_status(\"Moving part %d to %s\" % [part_id, station_name])
+	await move_carriage_to(to_local(target.global_position).x)
+	if not (await place_part_at(target)):
+		return false
+	await run_station_process(station_name, heartbeat_light)
+	return await pick_current_part()
+
+
+# Solve each pickup from the current part/marker, using this arm's actual link lengths.
+func pose_for_position(world_position: Vector3) -> Dictionary:
+	var local_position: Vector3 = carriage.to_local(world_position)
+	var shoulder_origin: Vector3 = carriage.to_local(shoulder_pivot.global_position)
+	var delta: Vector3 = local_position - shoulder_origin
+	var reach: float = Vector2(delta.x, delta.z).length()
+	var lower_length: float = elbow_pivot.position.y
+	var upper_length: float = wrist_roll_pivot.position.y + wrist_pitch_pivot.position.y
+	var tool_drop: float = tool_rotation_pivot.position.y + (pickup_point.get_parent() as Node3D).position.y
+	tool_drop += pickup_point.position.y + part_attach_offset_y
+	var wrist_height: float = delta.y + tool_drop
+	var distance: float = Vector2(reach, wrist_height).length()
+	if distance > lower_length + upper_length or distance < absf(lower_length - upper_length):
+		push_error(\"Target is outside the robot workspace: %s\" % world_position)
+		return {}
+	var elbow_cos: float = (distance * distance - lower_length * lower_length - upper_length * upper_length)
+	elbow_cos /= 2.0 * lower_length * upper_length
+	var elbow_angle: float = -acos(clampf(elbow_cos, -1.0, 1.0))
+	var shoulder_angle: float = atan2(wrist_height, reach)
+	shoulder_angle -= atan2(upper_length * sin(elbow_angle), lower_length + upper_length * cos(elbow_angle))
+	shoulder_angle -= PI / 2.0
+	return {
+		\"base_y\": rad_to_deg(atan2(-delta.z, delta.x)),
+		\"shoulder_z\": rad_to_deg(shoulder_angle),
+		\"elbow_z\": rad_to_deg(elbow_angle),
+		\"wrist_roll_y\": 0.0,
+		\"wrist_pitch_z\": -180.0 - rad_to_deg(shoulder_angle + elbow_angle),
+		\"tool_rotation_y\": 0.0
+	}
+
+
+func pick_current_part() -> bool:
+	set_status(\"Robot collecting part %d\" % part_id)
+	var position_to_pick: Vector3 = part.global_position
+	var approach_pose: Dictionary = pose_for_position(position_to_pick + Vector3.UP * approach_clearance)
+	var contact_pose: Dictionary = pose_for_position(position_to_pick)
+	if approach_pose.is_empty() or contact_pose.is_empty():
+		set_status(\"Target is outside the robot workspace\")
+		return false
+	await move_to_pose(approach_pose)
+	await move_to_pose(contact_pose, joint_move_duration * 0.5)
+	await wait_seconds(suction_pause)
+	attach_part_to_tool()
+	await wait_seconds(suction_pause)
+	await move_to_pose(approach_pose, joint_move_duration * 0.5)
+	await move_to_pose(POSE_CARRY)
+	return true
+
+
+func place_part_at(target: Marker3D) -> bool:
+	set_status(\"Robot placing part %d\" % part_id)
+	var approach_pose: Dictionary = pose_for_position(target.global_position + Vector3.UP * approach_clearance)
+	var contact_pose: Dictionary = pose_for_position(target.global_position)
+	if approach_pose.is_empty() or contact_pose.is_empty():
+		set_status(\"Target is outside the robot workspace\")
+		return false
+	await move_to_pose(approach_pose)
+	await move_to_pose(contact_pose, joint_move_duration * 0.5)
+	await wait_seconds(suction_pause)
+	release_part_at(target)
+	await wait_seconds(suction_pause)
+	await move_to_pose(approach_pose, joint_move_duration * 0.5)
+	await move_to_pose(POSE_CARRY)
+	return true
+
+
+# Reparenting makes the workpiece follow the moving tool.
+func attach_part_to_tool() -> void:
+	if part.get_parent() != pickup_point:
+		part.reparent(pickup_point, true)
+
+
+
+# The target marker provides the exact staged placement at each machine.
+func release_part_at(target: Marker3D) -> void:
+	if part.get_parent() != workpieces:
+		part.reparent(workpieces, false)
+
+	part.global_transform = target.global_transform
+
+
+func move_carriage_to(target_x: float) -> void:
+	if is_equal_approx(carriage.position.x, target_x):
+		return
+
+	var safe_speed: float = maxf(rail_speed, 0.01)
+	var distance: float = absf(carriage.position.x - target_x)
+	var duration: float = distance / safe_speed
+	var tween: Tween = create_tween()
+
+	tween.set_trans(Tween.TRANS_SINE)
+	tween.set_ease(Tween.EASE_IN_OUT)
+	tween.tween_property(carriage, \"position:x\", target_x, duration)
+
+	await tween.finished
+
+
+func move_to_pose(pose: Dictionary, duration: float = -1.0) -> void:
+	var actual_duration: float = duration
+	if actual_duration < 0.0:
+		actual_duration = joint_move_duration
+
+	await move_robot_to(
+		float(pose[\"base_y\"]),
+		float(pose[\"shoulder_z\"]),
+		float(pose[\"elbow_z\"]),
+		float(pose[\"wrist_roll_y\"]),
+		float(pose[\"wrist_pitch_z\"]),
+		float(pose[\"tool_rotation_y\"]),
+		actual_duration
+	)
+
+
+func move_robot_to(
+	base_y: float,
+	shoulder_z: float,
+	elbow_z: float,
+	wrist_roll_y: float,
+	wrist_pitch_z: float,
+	tool_rotation_y: float,
+	duration: float
+) -> void:
+	var tween: Tween = create_tween()
+
+	tween.set_parallel(true)
+	tween.set_trans(Tween.TRANS_SINE)
+	tween.set_ease(Tween.EASE_IN_OUT)
+
+	tween.tween_property(base_pivot, \"rotation_degrees:y\", base_y, duration)
+	tween.tween_property(shoulder_pivot, \"rotation_degrees:z\", shoulder_z, duration)
+	tween.tween_property(elbow_pivot, \"rotation_degrees:z\", elbow_z, duration)
+	tween.tween_property(wrist_roll_pivot, \"rotation_degrees:y\", wrist_roll_y, duration)
+	tween.tween_property(wrist_pitch_pivot, \"rotation_degrees:z\", wrist_pitch_z, duration)
+	tween.tween_property(tool_rotation_pivot, \"rotation_degrees:y\", tool_rotation_y, duration)
+
+	await tween.finished
+
+
+# Blinks the existing heartbeat mesh while a station is processing the part.
+func run_station_process(station_name: String, _heartbeat_light: Node3D) -> void:
+	set_status(\"%s processing part %d\" % [station_name, part_id])
+	var hmi: Node = get_node(\"../HMISystem\")
+	hmi.call(\"begin_processing\", station_name)
+	await wait_seconds(float(heartbeat_flashes) * heartbeat_interval * 2.0)
+	hmi.call(\"end_processing\", station_name)
+
+
+func reset_demo_state() -> void:
+	part.call(\"set_bend\", 0.0)
+	if is_instance_valid(bender_ram):
+		bender_ram.position = bender_ram_home
+	if part.get_parent() != workpieces:
+		part.reparent(workpieces, false)
+
+	part.global_transform = laser_target.global_transform
+	carriage.position.x = to_local(laser_target.global_position).x
+	apply_pose_immediately(POSE_HOME)
+	set_all_lights(false)
+	set_status(\"Part %d ready at laser cutter\" % part_id)
+
+
+func apply_pose_immediately(pose: Dictionary) -> void:
+	base_pivot.rotation_degrees = Vector3(
+		0.0,
+		float(pose[\"base_y\"]),
+		0.0
+	)
+	shoulder_pivot.rotation_degrees = Vector3(
+		0.0,
+		0.0,
+		float(pose[\"shoulder_z\"])
+	)
+	elbow_pivot.rotation_degrees = Vector3(
+		0.0,
+		0.0,
+		float(pose[\"elbow_z\"])
+	)
+	wrist_roll_pivot.rotation_degrees = Vector3(
+		0.0,
+		float(pose[\"wrist_roll_y\"]),
+		0.0
+	)
+	wrist_pitch_pivot.rotation_degrees = Vector3(
+		0.0,
+		0.0,
+		float(pose[\"wrist_pitch_z\"])
+	)
+	tool_rotation_pivot.rotation_degrees = Vector3(
+		0.0,
+		float(pose[\"tool_rotation_y\"]),
+		0.0
+	)
+
+
+func set_all_lights(_is_visible: bool) -> void:
+	laser_light.visible = true
+	bender_light.visible = true
+	weld_light.visible = true
+	inspection_light.visible = true
+
+
+func set_status(message: String) -> void:
+	print(message)
+	status_changed.emit(message)
+
+
+func wait_seconds(seconds: float) -> void:
+	await get_tree().create_timer(seconds).timeout
+
+
+func abort_demo() -> void:
+	set_all_lights(false)
+	animation_running = false
+	set_status(\"Demo stopped: unreachable pickup or placement target\")
+
+
+# Bender-specific choreography. Sheet stays attached to the suction tool.
+var bender_ram: Node3D
+var bender_ram_home: Vector3
+var bend_hinge: Vector3
+
+func initialize_bender_animation() -> void:
+	var model: Node = get_node(\"../Bender/Bender_PressBrake2\")
+	bender_ram = model.find_child(\"Ram\", true, false) as Node3D
+	if is_instance_valid(bender_ram):
+		bender_ram_home = bender_ram.position
+	# Add a small visual groove to the lower die without changing the GLB file.
+	var die: Node3D = model.find_child(\"LowerDie\", true, false) as Node3D
+	if is_instance_valid(die):
+		die.visible = false
+		var die_material: StandardMaterial3D = StandardMaterial3D.new()
+		die_material.albedo_color = Color(0.24, 0.28, 0.32)
+		die_material.metallic = 0.65
+		die_material.roughness = 0.5
+		for side: float in [-1.0, 1.0]:
+			var lip: MeshInstance3D = MeshInstance3D.new()
+			var box: BoxMesh = BoxMesh.new()
+			box.size = Vector3(2.48, 0.09, 0.035)
+			box.material = die_material
+			lip.mesh = box
+			lip.position = die.position + Vector3(0, 0, side * 0.06)
+			lip.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			die.get_parent().add_child(lip)
+		var bottom: MeshInstance3D = MeshInstance3D.new()
+		var bottom_mesh: BoxMesh = BoxMesh.new()
+		bottom_mesh.size = Vector3(2.48, 0.04, 0.085)
+		bottom_mesh.material = die_material
+		bottom.mesh = bottom_mesh
+		bottom.position = die.position + Vector3(0, -0.045, 0)
+		bottom.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		die.get_parent().add_child(bottom)
+
+func pose_for_sheet(world_position: Vector3, tilt_degrees: float) -> Dictionary:
+	var local_position: Vector3 = carriage.to_local(world_position)
+	var shoulder_origin: Vector3 = carriage.to_local(shoulder_pivot.global_position)
+	var delta: Vector3 = local_position - shoulder_origin
+	var tilt: float = deg_to_rad(tilt_degrees)
+	var lower_length: float = elbow_pivot.position.y
+	var upper_length: float = wrist_roll_pivot.position.y + wrist_pitch_pivot.position.y
+	var tool_drop: float = tool_rotation_pivot.position.y + (pickup_point.get_parent() as Node3D).position.y + pickup_point.position.y + part_attach_offset_y
+	var wrist_z: float = delta.z + tool_drop * sin(tilt)
+	var reach: float = Vector2(delta.x, wrist_z).length()
+	var height: float = delta.y + tool_drop * cos(tilt)
+	var distance: float = Vector2(reach, height).length()
+	if distance > lower_length + upper_length or distance < absf(lower_length - upper_length):
+		return {}
+	var cosine: float = (distance * distance - lower_length * lower_length - upper_length * upper_length) / (2.0 * lower_length * upper_length)
+	var elbow: float = -acos(clampf(cosine, -1.0, 1.0))
+	var shoulder: float = atan2(height, reach) - atan2(upper_length * sin(elbow), lower_length + upper_length * cos(elbow)) - PI / 2.0
+	return {
+		\"base_y\": rad_to_deg(atan2(-wrist_z, delta.x)),
+		\"shoulder_z\": rad_to_deg(shoulder), \"elbow_z\": rad_to_deg(elbow),
+		\"wrist_roll_y\": 0.0,
+		\"wrist_pitch_z\": -180.0 + tilt_degrees - rad_to_deg(shoulder + elbow),
+		\"tool_rotation_y\": 0.0
+	}
+
+func bend_grip_position(hinge: Vector3, tilt_degrees: float) -> Vector3:
+	return hinge + Basis(Vector3.RIGHT, deg_to_rad(tilt_degrees)) * Vector3(0, 0, 0.5)
+
+func visit_bender() -> bool:
+	if not is_instance_valid(bender_ram):
+		set_status(\"Bender ram was not found in the imported press model\")
+		return false
+	set_status(\"Moving part %d to the press brake\" % part_id)
+	await move_carriage_to(to_local(bender_target.global_position).x)
+	var model: Node3D = get_node(\"../Bender/Bender_PressBrake2\") as Node3D
+	bend_hinge = model.to_global(Vector3(0, 1.17, -0.4))
+	var entry_hinge: Vector3 = bend_hinge + Vector3(0, 0.06, 0)
+	var approach_hinge: Vector3 = entry_hinge + Vector3(0, 0.14, 0.55)
+	var approach: Dictionary = pose_for_sheet(bend_grip_position(approach_hinge, 8.0), 8.0)
+	var entry: Dictionary = pose_for_sheet(bend_grip_position(entry_hinge, 8.0), 8.0)
+	var level: Dictionary = pose_for_sheet(bend_grip_position(bend_hinge, 0.0), 0.0)
+	if approach.is_empty() or entry.is_empty() or level.is_empty():
+		set_status(\"Bender approach is outside the robot workspace\")
+		return false
+	for sample: int in range(21):
+		var t: float = float(sample) / 20.0
+		var hinge: Vector3 = bend_hinge + Vector3.DOWN * 0.06 * t
+		if pose_for_sheet(bend_grip_position(hinge, -8.0 * t), -8.0 * t).is_empty():
+			return false
+	# Contact transform uses a repeatable, off-centre grip on the flat front panel.
+	part.transform = Transform3D(pickup_point.global_transform.basis.inverse(), Vector3(0, part_attach_offset_y, 0))
+	set_status(\"Bender: tilting and inserting the sheet\")
+	await move_to_pose(approach)
+	await move_to_pose(entry, 1.2)
+	await move_to_pose(level, 0.8)
+	var hmi: Node = get_node(\"../HMISystem\")
+	hmi.call(\"begin_processing\", \"Bender\")
+	set_status(\"Bender: pressing a 90-degree flange; robot holding the sheet\")
+	var press: Tween = create_tween()
+	press.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	press.tween_method(_set_bend_progress, 0.0, 1.0, 2.2)
+	await press.finished
+	await wait_seconds(0.45)
+	set_status(\"Bender: raising the punch\")
+	var raise_ram: Tween = create_tween()
+	raise_ram.tween_property(bender_ram, \"position\", bender_ram_home, 0.8)
+	await raise_ram.finished
+	set_status(\"Bender: withdrawing the bent part\")
+	var exit_hinge: Vector3 = bend_hinge + Vector3(0, 0.12, 0.55)
+	var withdrawal: Dictionary = pose_for_sheet(bend_grip_position(exit_hinge, -8.0), -8.0)
+	if withdrawal.is_empty():
+		hmi.call(\"end_processing\", \"Bender\")
+		return false
+	await move_to_pose(withdrawal, 1.2)
+	await move_to_pose(POSE_CARRY)
+	hmi.call(\"end_processing\", \"Bender\")
+	return true
+
+func _set_bend_progress(progress: float) -> void:
+	var tilt: float = -8.0 * progress
+	var hinge: Vector3 = bend_hinge + Vector3.DOWN * 0.06 * progress
+	var pose: Dictionary = pose_for_sheet(bend_grip_position(hinge, tilt), tilt)
+	if not pose.is_empty():
+		apply_pose_immediately(pose)
+	part.call(\"set_bend\", 90.0 * progress)
+	bender_ram.position = bender_ram_home + Vector3.DOWN * 0.175 * progress
+"
 
 [sub_resource type="StandardMaterial3D" id="RailMat_Track"]
 albedo_color = Color(0.075, 0.09, 0.11, 1)
@@ -836,6 +1324,73 @@ instance_count = 16
 mesh = SubResource("RailMesh_16")
 buffer = PackedFloat32Array(0.1, 0, 0, 0, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.12, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.24, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.36, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.48, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.6, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.72, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.84, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.1, 0, 0, -0.96, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.085, 0, 0, -0.96, 0, 0.065, 0, -0.02, 0, 0, 0.17, 0.82, 0.085, 0, 0, -1.04, 0, 0.065, 0, -0.04143594, 0, 0, 0.17, 0.82, 0.085, 0, 0, -1.098564, 0, 0.065, 0, -0.1, 0, 0, 0.17, 0.82, 0.085, 0, 0, -1.12, 0, 0.065, 0, -0.18, 0, 0, 0.17, 0.82, 0.085, 0, 0, -1.098564, 0, 0.065, 0, -0.26, 0, 0, 0.17, 0.82, 0.085, 0, 0, -1.04, 0, 0.065, 0, -0.3185641, 0, 0, 0.17, 0.82, 0.085, 0, 0, -0.96, 0, 0.065, 0, -0.34, 0, 0, 0.17, 0.82)
 
+[sub_resource type="GDScript" id="Script_BendableSheet"]
+script/source = "extends Node3D
+
+# Rounded, prescribed flange deformation. Local origin is the suction grip.
+var bend_degrees: float = 0.0
+var steel: StandardMaterial3D
+@onready var sheet_mesh: MeshInstance3D = $PartMesh
+
+func _ready() -> void:
+	sheet_mesh.position = Vector3.ZERO
+	steel = StandardMaterial3D.new()
+	steel.albedo_color = Color(0.56, 0.61, 0.66)
+	steel.metallic = 0.65
+	steel.roughness = 0.45
+	steel.cull_mode = BaseMaterial3D.CULL_DISABLED
+	set_bend(0.0)
+
+func set_bend(degrees: float) -> void:
+	bend_degrees = clampf(degrees, 0.0, 90.0)
+	if not is_instance_valid(sheet_mesh):
+		return
+	var surface: SurfaceTool = SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	surface.set_material(steel)
+	var sections: Array = []
+	# Dense sampling around the bend; one continuous surface, not swapped models.
+	for i: int in range(41):
+		var z: float = -0.65 + float(i) * 0.02
+		var center: Vector3 = Vector3(0.0, 0.0, z)
+		var normal: Vector3 = Vector3.UP
+		var distance: float = -0.5 - z
+		var angle: float = deg_to_rad(bend_degrees)
+		if distance > 0.0 and angle > 0.0001:
+			var arc_length: float = 0.05
+			var radius: float = arc_length / angle
+			var theta: float = minf(distance / arc_length, 1.0) * angle
+			center.y = radius * (1.0 - cos(theta))
+			center.z = -0.5 - radius * sin(theta)
+			if distance > arc_length:
+				center.y += (distance - arc_length) * sin(angle)
+				center.z -= (distance - arc_length) * cos(angle)
+			normal = Vector3(0.0, cos(theta), sin(theta))
+		sections.append([
+			center + Vector3(-0.6, 0, 0) + normal * 0.025,
+			center + Vector3(0.6, 0, 0) + normal * 0.025,
+			center + Vector3(-0.6, 0, 0) - normal * 0.025,
+			center + Vector3(0.6, 0, 0) - normal * 0.025
+		])
+	for i: int in range(sections.size() - 1):
+		var a: Array = sections[i]
+		var b: Array = sections[i + 1]
+		_quad(surface, a[0], b[0], b[1], a[1])
+		_quad(surface, a[2], a[3], b[3], b[2])
+		_quad(surface, a[0], a[2], b[2], b[0])
+		_quad(surface, a[1], b[1], b[3], a[3])
+	var first: Array = sections[0]
+	var last: Array = sections[-1]
+	_quad(surface, first[0], first[1], first[3], first[2])
+	_quad(surface, last[0], last[2], last[3], last[1])
+	surface.generate_normals()
+	sheet_mesh.mesh = surface.commit()
+
+func _quad(surface: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> void:
+	for vertex: Vector3 in [a, b, c, a, c, d]:
+		surface.add_vertex(vertex)
+"
+
 [sub_resource type="BoxMesh" id="BoxMesh_nb4f5"]
 size = Vector3(1.2, 0.05, 0.8)
 
@@ -847,6 +1402,10 @@ size = Vector3(1.8, 1, 2)
 
 [sub_resource type="BoxMesh" id="BoxMesh_vnvhg"]
 size = Vector3(1.2, 1.2, 0.6)
+
+[sub_resource type="StandardMaterial3D" id="Mat_HMIDisplay"]
+shading_mode = 0
+albedo_color = Color(0.018, 0.03, 0.045, 1)
 
 [sub_resource type="BoxMesh" id="BoxMesh_k8rwe"]
 size = Vector3(1, 0.65, 0.08)
@@ -1229,6 +1788,203 @@ roughness = 0.9
 material = SubResource("Mat_CellStripe")
 size = Vector3(1, 0.008, 0.08)
 
+[sub_resource type="GDScript" id="Script_CellHMI"]
+script/source = "extends Node
+
+# Presentation-only connection simulation; no PLC/network transport is used.
+var states: Array[String] = [\"CONNECTING\", \"CONNECTING\", \"CONNECTING\", \"CONNECTING\"]
+var station_names: Array[String] = [\"LASER\", \"BENDER\", \"WELDER\", \"INSPECTION\"]
+var elapsed: float = 0.0
+var refresh_elapsed: float = 0.0
+var latest_status: String = \"Establishing station connections...\"
+var overlay: PanelContainer
+var summary: Label
+var message_label: Label
+var card_labels: Array[Label] = []
+var card_styles: Array[StyleBoxFlat] = []
+var physical_label: Label3D
+var lights: Array[MeshInstance3D] = []
+var lamp_materials: Array[StandardMaterial3D] = []
+@onready var robot: Node = $\"../RobotSystem\"
+@onready var gate: Node = $\"../CellEnclosure/AccessGate\"
+@onready var console: Node3D = $\"../HMIConsole\"
+
+func _ready() -> void:
+	for path: String in [\"../LaserCutter/HeartbeatLight\", \"../Bender/HeartbeatLight2\", \"../WeldCell/HeartbeatLight3\", \"../Inspection/HeartbeatLight4\"]:
+		var light: MeshInstance3D = get_node(path) as MeshInstance3D
+		var material: StandardMaterial3D = StandardMaterial3D.new()
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		light.material_override = material
+		light.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		light.visible = true
+		lights.append(light)
+		lamp_materials.append(material)
+	robot.connect(\"status_changed\", _on_robot_status)
+	_build_hmi()
+	_refresh()
+
+func _build_hmi() -> void:
+	var canvas: CanvasLayer = CanvasLayer.new()
+	canvas.layer = 3
+	add_child(canvas)
+	overlay = PanelContainer.new()
+	overlay.anchor_left = 1.0
+	overlay.anchor_right = 1.0
+	overlay.anchor_top = 1.0
+	overlay.anchor_bottom = 1.0
+	overlay.offset_left = -610.0
+	overlay.offset_top = -245.0
+	overlay.offset_right = -18.0
+	overlay.offset_bottom = -18.0
+	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var background: StyleBoxFlat = StyleBoxFlat.new()
+	background.bg_color = Color(0.025, 0.04, 0.065, 0.96)
+	background.set_corner_radius_all(8)
+	background.content_margin_left = 16.0
+	background.content_margin_right = 16.0
+	background.content_margin_top = 12.0
+	background.content_margin_bottom = 12.0
+	overlay.add_theme_stylebox_override(\"panel\", background)
+	canvas.add_child(overlay)
+	var column: VBoxContainer = VBoxContainer.new()
+	column.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	column.add_theme_constant_override(\"separation\", 10)
+	overlay.add_child(column)
+	var heading: Label = Label.new()
+	heading.text = \"CELL HMI  /  SIMULATED CONNECTIONS\"
+	heading.add_theme_font_size_override(\"font_size\", 20)
+	column.add_child(heading)
+	summary = Label.new()
+	column.add_child(summary)
+	var row: HBoxContainer = HBoxContainer.new()
+	row.add_theme_constant_override(\"separation\", 8)
+	column.add_child(row)
+	for i: int in range(4):
+		var card: PanelContainer = PanelContainer.new()
+		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var style: StyleBoxFlat = StyleBoxFlat.new()
+		style.bg_color = Color(0.055, 0.075, 0.10)
+		style.set_border_width_all(2)
+		style.set_corner_radius_all(4)
+		style.content_margin_left = 8.0
+		style.content_margin_right = 8.0
+		style.content_margin_top = 10.0
+		style.content_margin_bottom = 10.0
+		card.add_theme_stylebox_override(\"panel\", style)
+		row.add_child(card)
+		var label: Label = Label.new()
+		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		label.add_theme_font_size_override(\"font_size\", 14)
+		card.add_child(label)
+		card_labels.append(label)
+		card_styles.append(style)
+	message_label = Label.new()
+	message_label.custom_minimum_size.x = 550.0
+	message_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	column.add_child(message_label)
+	var help: Label = Label.new()
+	help.text = \"H: HMI  |  J: welder fault (idle)  |  R: reconnect  |  G: gate\"
+	help.add_theme_font_size_override(\"font_size\", 13)
+	help.modulate = Color(0.7, 0.76, 0.84)
+	column.add_child(help)
+	physical_label = Label3D.new()
+	physical_label.name = \"LiveHMIDisplay\"
+	physical_label.position = Vector3(0.0, 1.25, 0.385)
+	physical_label.pixel_size = 0.00125
+	physical_label.font_size = 25
+	physical_label.outline_size = 3
+	physical_label.modulate = Color(0.7, 0.95, 1.0)
+	physical_label.shaded = false
+	physical_label.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	console.add_child(physical_label)
+
+func _process(delta: float) -> void:
+	elapsed += delta
+	refresh_elapsed += delta
+	for i: int in range(4):
+		if states[i] == \"CONNECTING\" and elapsed >= 1.5 + float(i) * 0.45:
+			states[i] = \"READY\"
+	if refresh_elapsed >= 0.15:
+		refresh_elapsed = 0.0
+		_refresh()
+
+func _refresh() -> void:
+	var rows: String = \"CELL CONTROL  /  SIMULATION\\n\"
+	for i: int in range(4):
+		var color: Color = Color(0.18, 0.95, 0.42)
+		if states[i] == \"CONNECTING\":
+			color = Color(1.0, 0.72, 0.09) * (0.6 + 0.4 * absf(sin(elapsed * 3.0)))
+		elif states[i] == \"FAULT\":
+			color = Color(1.0, 0.13, 0.16)
+		elif states[i] == \"RUNNING\":
+			color *= 1.0 if sin(elapsed * 10.0) > 0.0 else 0.3
+		color.a = 1.0
+		lamp_materials[i].albedo_color = color
+		lights[i].visible = true
+		card_styles[i].border_color = color
+		card_labels[i].text = station_names[i] + \"\\n\" + states[i]
+		rows += station_names[i] + \": \" + states[i] + \"\\n\"
+	var gate_text: String = \"CLOSED\" if bool(gate.get(\"gate_closed\")) else \"OPEN\"
+	if bool(gate.get(\"gate_moving\")):
+		gate_text = \"MOVING\"
+	var cycle: String = \"RUNNING\" if bool(robot.get(\"animation_running\")) else \"IDLE\"
+	summary.text = \"PART %s   |   CYCLE: %s   |   GATE: %s\" % [str(robot.get(\"part_id\")), cycle, gate_text]
+	message_label.text = latest_status
+	rows += \"PART %s  |  GATE %s\" % [str(robot.get(\"part_id\")), gate_text]
+	if physical_label.text != rows:
+		physical_label.text = rows
+
+func _on_robot_status(message: String) -> void:
+	latest_status = message
+
+func cycle_block_reason() -> String:
+	for i: int in range(4):
+		var required: bool = i == 0 or (i == 1 and bool(robot.get(\"use_bender\"))) or (i == 2 and bool(robot.get(\"use_welder\"))) or (i == 3 and bool(robot.get(\"use_inspection\")))
+		if required and states[i] != \"READY\":
+			return \"Start blocked: %s is %s.\" % [station_names[i], states[i].to_lower()]
+	return \"\"
+
+func begin_processing(station_name: String) -> void:
+	var index: int = _station_index(station_name)
+	if index >= 0:
+		states[index] = \"RUNNING\"
+	_refresh()
+
+func end_processing(station_name: String) -> void:
+	var index: int = _station_index(station_name)
+	if index >= 0:
+		states[index] = \"READY\"
+	_refresh()
+
+func _station_index(station_name: String) -> int:
+	var normalized: String = station_name.to_upper()
+	for i: int in range(4):
+		if normalized.begins_with(station_names[i]):
+			return i
+	return -1
+
+func _unhandled_input(event: InputEvent) -> void:
+	if not (event is InputEventKey) or not event.pressed or event.echo:
+		return
+	if event.physical_keycode == KEY_H:
+		overlay.visible = not overlay.visible
+		get_viewport().set_input_as_handled()
+	elif event.physical_keycode == KEY_J or event.physical_keycode == KEY_R:
+		get_viewport().set_input_as_handled()
+		if bool(robot.get(\"animation_running\")):
+			latest_status = \"Wait for the cycle to finish before testing connection faults.\"
+			return
+		if event.physical_keycode == KEY_J:
+			states[2] = \"FAULT\"
+			latest_status = \"Welder connection timed out (simulated). Press R to reconnect.\"
+		else:
+			states.assign([\"CONNECTING\", \"CONNECTING\", \"CONNECTING\", \"CONNECTING\"])
+			elapsed = 0.0
+			latest_status = \"Reconnecting all stations...\"
+		_refresh()
+"
+
 [node name="Factory" type="Node3D" unique_id=1626147915]
 
 [node name="Floor" type="MeshInstance3D" parent="." unique_id=808266017]
@@ -1448,7 +2204,7 @@ mesh = SubResource("ArmMesh_1")
 transform = Transform3D(6.123234e-17, 0, -1, 0, 1, 0, 1, 0, 6.123234e-17, 0, 0.3, 0)
 
 [node name="ShoulderPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot" unique_id=146237934]
-transform = Transform3D(0.866025404, 0.5, 0, -0.5, 0.866025404, 0, 0, 0, 1, 0, 0, 0)
+transform = Transform3D(0.8660254, 0.5, 0, -0.5, 0.8660254, 0, 0, 0, 1, 0, 0, 0)
 
 [node name="LowerArm" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1790794962]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
@@ -1503,7 +2259,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.12, 0.24336)
 mesh = SubResource("ArmMesh_22")
 
 [node name="ElbowPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot" unique_id=1559764716]
-transform = Transform3D(-0.707106781, -0.707106781, 0, 0.707106781, -0.707106781, 0, 0, 0, 1, 0, 1.8, 0)
+transform = Transform3D(-0.70710677, -0.70710677, 0, 0.70710677, -0.70710677, 0, 0, 0, 1, 0, 1.8, 0)
 
 [node name="UpperArm" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot" unique_id=96010901]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.7, 0)
@@ -1565,7 +2321,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.15, 0)
 mesh = SubResource("ArmMesh_87")
 
 [node name="WristPitchPivot" type="Node3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot" unique_id=988670743]
-transform = Transform3D(0.258819045, -0.965925826, 0, 0.965925826, 0.258819045, 0, 0, 0, 1, 0, 0.3, 0)
+transform = Transform3D(0.25881904, -0.9659258, 0, 0.9659258, 0.25881904, 0, 0, 0, 1, 0, 0.3, 0)
 
 [node name="WristLink" type="MeshInstance3D" parent="RobotSystem/Carriage/RobotBase/BasePivot/ShoulderPivot/ElbowPivot/WristRollPivot/WristPitchPivot" unique_id=782823059]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.2, 0)
@@ -1940,8 +2696,10 @@ multimesh = SubResource("RailBatch_CableServiceLoop")
 
 [node name="Part01" type="Node3D" parent="WorkPieces" unique_id=1807876620]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1.075, -2.72)
+script = SubResource("Script_BendableSheet")
 
 [node name="PartMesh" type="MeshInstance3D" parent="WorkPieces/Part01" unique_id=1579539128]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.25)
 mesh = SubResource("BoxMesh_nb4f5")
 
 [node name="ProcessTargets" type="Node3D" parent="." unique_id=791537972]
@@ -1979,6 +2737,7 @@ mesh = SubResource("BoxMesh_vnvhg")
 
 [node name="ScreenPanel" type="MeshInstance3D" parent="HMIConsole" unique_id=452751212]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.25, 0.34)
+material_override = SubResource("Mat_HMIDisplay")
 mesh = SubResource("BoxMesh_k8rwe")
 
 [node name="HMIStaticBody" type="StaticBody3D" parent="HMIConsole" unique_id=375410627 groups=["hmi_console"]]
@@ -2925,3 +3684,6 @@ theme_override_constants/shadow_offset_x = 2
 theme_override_constants/shadow_offset_y = 2
 theme_override_font_sizes/font_size = 18
 text = "ROBOT CELL"
+
+[node name="HMISystem" type="Node" parent="." unique_id=784979550]
+script = SubResource("Script_CellHMI")
