@@ -1,4 +1,4 @@
-[gd_scene format=3 uid="uid://qg75o8mw4awa"]
+[gd_scene format=3 uid="uid://bqwi38jui8oy4"]
 
 [ext_resource type="PackedScene" uid="uid://bjoefar384f5w" path="res://assets/machines/Cutter_LaserBed.glb" id="1_br4io"]
 [ext_resource type="PackedScene" uid="uid://dqhwote23yjqr" path="res://assets/machines/Bender_PressBrake.glb" id="1_keyo3"]
@@ -87,6 +87,15 @@ const POSE_CARRY: Dictionary = {
 @export var heartbeat_interval: float = 0.25
 @export var part_attach_offset_y: float = 0.025
 @export var approach_clearance: float = 0.25
+# Where the suction plate holds the sheet, in sheet-local space (part origin = old edge grip).
+# The plate has cups 0.5 m apart along the sheet depth, so the grip must sit well inside the
+# sheet: z = -0.2 puts all four cups on the flat panel, even while the flange is being bent.
+@export var grip_local: Vector3 = Vector3(0.0, 0.0, -0.2)
+
+# Station animations (laser beam, weld arc, inspection scan).
+@export var show_station_effects: bool = true
+# Chance that the animated inspection passes (1.0 = always, 0.8 matches the cell).
+@export_range(0.0, 1.0) var inspection_pass_rate: float = 1.0
 
 # These switches represent the routing choices made by the CODESYS logic.
 @export var part_id: int = 1
@@ -123,9 +132,36 @@ const POSE_CARRY: Dictionary = {
 
 var animation_running: bool = false
 
+# Moving parts of the real machine models. The cutter has Gantry_Z with
+# LaserHead_X; the welder has Torch_X with Torch_Z. They are found in _ready.
+var laser_bed: Node3D
+var laser_gantry: Node3D
+var laser_head: Node3D
+var laser_beam: MeshInstance3D
+var laser_tip: Node3D
+var laser_sparks: CPUParticles3D
+var laser_glow: OmniLight3D
+var laser_home: Vector2 = Vector2.ZERO    # head x, gantry z at rest
+var laser_nozzle_z: float = -0.12         # nozzle z relative to the gantry
+var laser_nozzle_tip_y: float = 1.145     # nozzle tip height in the bed model
+
+var weld_bed: Node3D
+var weld_x_node: Node3D
+var weld_z_node: Node3D
+var weld_x_home: float = 0.0
+var weld_z_home: Vector3 = Vector3.ZERO
+var weld_tip_offset: float = -0.865       # nozzle tip below the Torch_Z origin
+var weld_tip: Node3D
+var weld_arc_mesh: MeshInstance3D
+var weld_arc_light: OmniLight3D
+var weld_sparks: CPUParticles3D
+var weld_extension: MeshInstance3D
+
 
 func _ready() -> void:
 	initialize_bender_animation()
+	_find_machine_axes()
+	_print_fx_status()
 	reset_demo_state()
 
 
@@ -233,7 +269,7 @@ func pose_for_position(world_position: Vector3) -> Dictionary:
 
 func pick_current_part() -> bool:
 	set_status(\"Robot collecting part %d\" % part_id)
-	var position_to_pick: Vector3 = part.global_position
+	var position_to_pick: Vector3 = part.global_transform * grip_local
 	var approach_pose: Dictionary = pose_for_position(position_to_pick + Vector3.UP * approach_clearance)
 	var contact_pose: Dictionary = pose_for_position(position_to_pick)
 	if approach_pose.is_empty() or contact_pose.is_empty():
@@ -251,8 +287,9 @@ func pick_current_part() -> bool:
 
 func place_part_at(target: Marker3D) -> bool:
 	set_status(\"Robot placing part %d\" % part_id)
-	var approach_pose: Dictionary = pose_for_position(target.global_position + Vector3.UP * approach_clearance)
-	var contact_pose: Dictionary = pose_for_position(target.global_position)
+	var grip_target: Vector3 = target.global_transform * grip_local
+	var approach_pose: Dictionary = pose_for_position(grip_target + Vector3.UP * approach_clearance)
+	var contact_pose: Dictionary = pose_for_position(grip_target)
 	if approach_pose.is_empty() or contact_pose.is_empty():
 		set_status(\"Target is outside the robot workspace\")
 		return false
@@ -343,11 +380,15 @@ func run_station_process(station_name: String, _heartbeat_light: Node3D) -> void
 	set_status(\"%s processing part %d\" % [station_name, part_id])
 	var hmi: Node = get_node(\"../HMISystem\")
 	hmi.call(\"begin_processing\", station_name)
-	await wait_seconds(float(heartbeat_flashes) * heartbeat_interval * 2.0)
+	var duration: float = float(heartbeat_flashes) * heartbeat_interval * 2.0
+	_play_station_effect(station_name, duration)
+	await wait_seconds(duration)
 	hmi.call(\"end_processing\", station_name)
 
 
 func reset_demo_state() -> void:
+	_clear_part_effects()
+	_park_machines()
 	part.call(\"set_bend\", 0.0)
 	if is_instance_valid(bender_ram):
 		bender_ram.position = bender_ram_home
@@ -416,6 +457,435 @@ func abort_demo() -> void:
 	set_status(\"Demo stopped: unreachable pickup or placement target\")
 
 
+# ---------------------------------------------------------------------------
+# Station animations. Everything is built in code and parented to the part, so
+# the effects follow it and are removed again by reset_demo_state().
+# Sheet geometry (part local): x -0.6..0.6, z -0.65..0.15, top surface y = 0.025.
+# ---------------------------------------------------------------------------
+const SHEET_CENTRE: Vector3 = Vector3(0.0, 0.03, -0.25)
+
+
+func _play_station_effect(station_name: String, duration: float) -> void:
+	if not show_station_effects:
+		return
+	_clear_station_fx()
+	match station_name:
+		\"Laser cutter\":
+			await _laser_effect(duration)
+		\"Welder\":
+			await _weld_effect(duration)
+		\"Inspection\":
+			await _inspection_effect(duration)
+
+
+func _clear_station_fx() -> void:
+	var old: Node = part.get_node_or_null(\"StationFX\")
+	if old != null:
+		part.remove_child(old)
+		old.queue_free()
+
+
+func _clear_part_effects() -> void:
+	for child_name: String in [\"StationFX\", \"WeldBead\", \"ResultTag\"]:
+		var node: Node = part.get_node_or_null(child_name)
+		if node != null:
+			part.remove_child(node)
+			node.queue_free()
+
+
+func _new_fx_root() -> Node3D:
+	var root: Node3D = Node3D.new()
+	root.name = \"StationFX\"
+	root.position = SHEET_CENTRE
+	part.add_child(root)
+	return root
+
+
+func _glow_material(color: Color, energy: float = 3.0) -> StandardMaterial3D:
+	var material: StandardMaterial3D = StandardMaterial3D.new()
+	material.albedo_color = color
+	material.emission_enabled = true
+	material.emission = color
+	material.emission_energy_multiplier = energy
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	return material
+
+
+func _metal_material(color: Color) -> StandardMaterial3D:
+	var material: StandardMaterial3D = StandardMaterial3D.new()
+	material.albedo_color = color
+	material.metallic = 0.6
+	material.roughness = 0.4
+	return material
+
+
+func _fx_mesh(
+	parent: Node3D,
+	mesh: Mesh,
+	material: Material,
+	position_in_parent: Vector3,
+	mesh_name: String
+) -> MeshInstance3D:
+	var instance: MeshInstance3D = MeshInstance3D.new()
+	instance.name = mesh_name
+	instance.mesh = mesh
+	instance.material_override = material
+	instance.position = position_in_parent
+	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(instance)
+	return instance
+
+
+func _fx_light(
+	parent: Node3D,
+	color: Color,
+	energy: float,
+	light_range: float,
+	position_in_parent: Vector3
+) -> OmniLight3D:
+	var light: OmniLight3D = OmniLight3D.new()
+	light.light_color = color
+	light.light_energy = energy
+	light.omni_range = light_range
+	light.position = position_in_parent
+	parent.add_child(light)
+	return light
+
+
+func _fx_sparks(
+	parent: Node3D,
+	color: Color,
+	amount: int,
+	speed: float,
+	position_in_parent: Vector3
+) -> CPUParticles3D:
+	var spark_mesh: SphereMesh = SphereMesh.new()
+	spark_mesh.radius = 0.01
+	spark_mesh.height = 0.02
+	spark_mesh.radial_segments = 6
+	spark_mesh.rings = 3
+	spark_mesh.material = _glow_material(color, 4.0)
+	var sparks: CPUParticles3D = CPUParticles3D.new()
+	sparks.mesh = spark_mesh
+	sparks.amount = amount
+	sparks.lifetime = 0.5
+	sparks.direction = Vector3.UP
+	sparks.spread = 65.0
+	sparks.initial_velocity_min = speed * 0.5
+	sparks.initial_velocity_max = speed
+	sparks.gravity = Vector3(0.0, -4.0, 0.0)
+	sparks.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	sparks.position = position_in_parent
+	sparks.emitting = true
+	parent.add_child(sparks)
+	return sparks
+
+
+# Point at `progress` (0..1) along a polyline, by distance travelled.
+func _path_point(points: Array[Vector3], progress: float) -> Vector3:
+	var total: float = 0.0
+	for i: int in range(points.size() - 1):
+		total += points[i].distance_to(points[i + 1])
+	var remaining: float = clampf(progress, 0.0, 1.0) * total
+	for i: int in range(points.size() - 1):
+		var length: float = points[i].distance_to(points[i + 1])
+		if remaining <= length or i == points.size() - 2:
+			return points[i].lerp(points[i + 1], clampf(remaining / maxf(length, 0.0001), 0.0, 1.0))
+		remaining -= length
+	return points[0]
+
+
+# ---------------------------------------------------------------------------
+# Real machine axes. The cutter and welder models contain separate moving parts
+# (Gantry_Z + LaserHead_X and Torch_X + Torch_Z). They are animated here, and
+# the beam, arc and sparks are attached to them, so everything moves with the
+# machine. Positions are converted into each model's own space, so the paths
+# follow wherever the part sits.
+# ---------------------------------------------------------------------------
+func _find_machine_axes() -> void:
+	var laser_station: Node = get_node_or_null(\"../LaserCutter\")
+	if laser_station != null:
+		laser_gantry = laser_station.find_child(\"Gantry_Z*\", true, false) as Node3D
+	if laser_gantry != null:
+		laser_head = laser_gantry.find_child(\"LaserHead_X*\", true, false) as Node3D
+		laser_bed = laser_gantry.get_parent() as Node3D
+	if laser_gantry != null and laser_head != null:
+		laser_home = Vector2(laser_head.position.x, laser_gantry.position.z)
+		var laser_nozzle: MeshInstance3D = laser_head.find_child(\"CopperNozzle*\", true, false) as MeshInstance3D
+		if laser_nozzle != null:
+			laser_nozzle_z = laser_nozzle.position.z
+			laser_nozzle_tip_y = laser_nozzle.position.y + laser_nozzle.get_aabb().position.y
+		_build_laser_beam()
+	else:
+		laser_gantry = null
+		laser_head = null
+		print(\"FX: laser cutter axes NOT found (station=\", laser_station, \")\")
+		push_warning(\"Laser cutter: Gantry_Z / LaserHead_X not found, laser animation off\")
+
+	var weld_station: Node = get_node_or_null(\"../WeldCell\")
+	if weld_station != null:
+		weld_x_node = weld_station.find_child(\"Torch_X*\", true, false) as Node3D
+	if weld_x_node != null:
+		weld_z_node = weld_x_node.find_child(\"Torch_Z*\", true, false) as Node3D
+		weld_bed = weld_x_node.get_parent() as Node3D
+	if weld_x_node != null and weld_z_node != null:
+		weld_x_home = weld_x_node.position.x
+		weld_z_home = weld_z_node.position
+		var weld_nozzle: MeshInstance3D = weld_z_node.find_child(\"CopperNozzle*\", true, false) as MeshInstance3D
+		if weld_nozzle != null:
+			weld_tip_offset = weld_nozzle.position.y + weld_nozzle.get_aabb().position.y
+		_build_weld_tools()
+	else:
+		weld_x_node = null
+		weld_z_node = null
+		print(\"FX: welder axes NOT found (station=\", weld_station, \")\")
+		push_warning(\"Welder: Torch_X / Torch_Z not found, weld animation off\")
+
+
+func _print_fx_status() -> void:
+	print(\"FX: laser gantry=\", laser_gantry, \" head=\", laser_head, \" beam=\", laser_beam)
+	print(\"FX: weld x=\", weld_x_node, \" z=\", weld_z_node, \" extension=\", weld_extension)
+
+
+func _park_machines() -> void:
+	_park_laser()
+	_park_welder()
+
+
+func _build_laser_beam() -> void:
+	var beam_mesh: CylinderMesh = CylinderMesh.new()
+	beam_mesh.top_radius = 0.008
+	beam_mesh.bottom_radius = 0.008
+	beam_mesh.height = 0.05
+	beam_mesh.radial_segments = 8
+	laser_beam = _fx_mesh(laser_head, beam_mesh, _glow_material(Color(1.0, 0.1, 0.05), 5.0), Vector3(0.0, laser_nozzle_tip_y - 0.025, laser_nozzle_z), \"Beam\")
+	laser_tip = Node3D.new()
+	laser_tip.name = \"Tip\"
+	laser_tip.position = Vector3(0.0, laser_nozzle_tip_y - 0.05, laser_nozzle_z)
+	laser_head.add_child(laser_tip)
+	laser_glow = _fx_light(laser_tip, Color(1.0, 0.2, 0.1), 2.0, 1.2, Vector3(0.0, 0.08, 0.0))
+	laser_sparks = _fx_sparks(laser_tip, Color(1.0, 0.75, 0.3), 36, 1.6, Vector3.ZERO)
+	_park_laser()
+
+
+func _park_laser() -> void:
+	if not is_instance_valid(laser_gantry) or not is_instance_valid(laser_head):
+		return
+	laser_head.position.x = laser_home.x
+	laser_gantry.position.z = laser_home.y
+	if is_instance_valid(laser_beam):
+		laser_beam.visible = false
+		laser_glow.visible = false
+		laser_sparks.emitting = false
+
+
+# Laser cutter: the real gantry and head trace the outline of the sheet.
+func _laser_effect(duration: float) -> void:
+	if not is_instance_valid(laser_gantry) or not is_instance_valid(laser_head) or not is_instance_valid(laser_beam):
+		return
+	var sheet_top: Vector3 = laser_bed.to_local(part.to_global(SHEET_CENTRE))
+	var corners: Array[Vector3] = [
+		Vector3(-0.5, 0.0, -0.3),
+		Vector3(0.5, 0.0, -0.3),
+		Vector3(0.5, 0.0, 0.3),
+		Vector3(-0.5, 0.0, 0.3),
+		Vector3(-0.5, 0.0, -0.3)
+	]
+	var cut_path: Array[Vector3] = []
+	for corner: Vector3 in corners:
+		cut_path.append(laser_bed.to_local(part.to_global(SHEET_CENTRE + corner)))
+	# Nozzle position at rest, in the same space as the cut path.
+	var home: Vector3 = Vector3(laser_home.x, sheet_top.y, laser_home.y + laser_nozzle_z)
+
+	# Stretch the beam from the nozzle tip down to the sheet surface.
+	var beam_length: float = maxf(laser_nozzle_tip_y - (sheet_top.y - 0.005), 0.02)
+	(laser_beam.mesh as CylinderMesh).height = beam_length
+	laser_beam.position.y = laser_nozzle_tip_y - beam_length / 2.0
+	laser_tip.position.y = laser_nozzle_tip_y - beam_length
+
+	var travel_share: float = 0.18
+	var elapsed: float = 0.0
+	while elapsed < duration:
+		var u: float = elapsed / duration
+		var pos: Vector3
+		var cutting: bool = false
+		if u < travel_share:
+			pos = home.lerp(cut_path[0], u / travel_share)
+		elif u < 1.0 - travel_share:
+			pos = _path_point(cut_path, (u - travel_share) / (1.0 - 2.0 * travel_share))
+			cutting = true
+		else:
+			pos = cut_path[cut_path.size() - 1].lerp(home, (u - (1.0 - travel_share)) / travel_share)
+		laser_head.position.x = pos.x
+		laser_gantry.position.z = pos.z - laser_nozzle_z
+		laser_beam.visible = cutting
+		laser_glow.visible = cutting
+		laser_sparks.emitting = cutting
+		await get_tree().process_frame
+		elapsed += get_process_delta_time()
+	_park_laser()
+
+
+func _build_weld_tools() -> void:
+	# Arc, light and sparks sit on the real nozzle tip.
+	weld_tip = Node3D.new()
+	weld_tip.name = \"WeldTip\"
+	weld_tip.position = Vector3(0.0, weld_tip_offset, 0.0)
+	weld_z_node.add_child(weld_tip)
+	var arc_mesh: SphereMesh = SphereMesh.new()
+	arc_mesh.radius = 0.02
+	arc_mesh.height = 0.04
+	arc_mesh.radial_segments = 8
+	arc_mesh.rings = 4
+	weld_arc_mesh = _fx_mesh(weld_tip, arc_mesh, _glow_material(Color(0.75, 0.9, 1.0), 8.0), Vector3.ZERO, \"Arc\")
+	weld_arc_light = _fx_light(weld_tip, Color(0.6, 0.8, 1.0), 4.0, 1.5, Vector3(0.0, 0.05, 0.0))
+	weld_sparks = _fx_sparks(weld_tip, Color(1.0, 0.6, 0.2), 50, 2.2, Vector3.ZERO)
+
+	# The torch drops on its vertical slide. This rod grows from the top of the
+	# slide up to the carriage so the torch never looks detached.
+	var slide: MeshInstance3D = weld_z_node.find_child(\"VerticalSlide*\", true, false) as MeshInstance3D
+	var extension_material: Material = null
+	if slide != null:
+		extension_material = slide.get_active_material(0)
+	if extension_material == null:
+		extension_material = _metal_material(Color(0.5, 0.52, 0.56))
+	var extension_mesh: BoxMesh = BoxMesh.new()
+	extension_mesh.size = Vector3(0.12, 1.0, 0.14)
+	weld_extension = _fx_mesh(weld_z_node, extension_mesh, extension_material, Vector3(0.0, 0.005, 0.0), \"SlideExtension\")
+	_park_welder()
+
+
+func _park_welder() -> void:
+	if not is_instance_valid(weld_x_node) or not is_instance_valid(weld_z_node):
+		return
+	weld_x_node.position.x = weld_x_home
+	weld_z_node.position = weld_z_home
+	if is_instance_valid(weld_extension):
+		_set_weld_extension(0.0)
+		weld_arc_mesh.visible = false
+		weld_arc_light.visible = false
+		weld_sparks.emitting = false
+
+
+func _set_weld_extension(length: float) -> void:
+	var visible_length: float = maxf(length, 0.001)
+	weld_extension.scale = Vector3(1.0, visible_length, 1.0)
+	weld_extension.position = Vector3(0.0, 0.005 + visible_length / 2.0, 0.0)
+	weld_extension.visible = length > 0.002
+
+
+# Welder: the real torch moves along the beam, drops to the seam, welds and
+# leaves a bead, then lifts and returns to its rest position.
+func _weld_effect(duration: float) -> void:
+	if not is_instance_valid(weld_x_node) or not is_instance_valid(weld_z_node) or not is_instance_valid(weld_extension):
+		return
+	var seam_z: float = -0.16      # root local; just inside the flat part next to the flange
+	var start_x: float = -0.45
+	var end_x: float = 0.45
+	var start_local: Vector3 = weld_bed.to_local(part.to_global(SHEET_CENTRE + Vector3(start_x, 0.0, seam_z)))
+	var end_local: Vector3 = weld_bed.to_local(part.to_global(SHEET_CENTRE + Vector3(end_x, 0.0, seam_z)))
+	# Torch_Z height that puts the nozzle tip just above the sheet.
+	var tip_target_y: float = start_local.y + 0.025
+	var low_y: float = tip_target_y - weld_x_node.position.y - weld_tip_offset
+	var seam_torch_z: float = start_local.z - weld_x_node.position.z
+	var home_y: float = weld_z_home.y
+	var home_z: float = weld_z_home.z
+
+	# The bead stays on the part (until reset) so the weld remains visible.
+	var old_bead: Node = part.get_node_or_null(\"WeldBead\")
+	if old_bead != null:
+		part.remove_child(old_bead)
+		old_bead.queue_free()
+	var bead_mesh: BoxMesh = BoxMesh.new()
+	bead_mesh.size = Vector3(1.0, 0.012, 0.025)
+	var bead: MeshInstance3D = _fx_mesh(part, bead_mesh, _glow_material(Color(1.0, 0.45, 0.1), 3.0), SHEET_CENTRE, \"WeldBead\")
+	bead.scale = Vector3(0.001, 1.0, 1.0)
+
+	var elapsed: float = 0.0
+	while elapsed < duration:
+		var u: float = elapsed / duration
+		var torch_x: float = start_local.x
+		var torch_y: float = home_y
+		var torch_z: float = seam_torch_z
+		var progress: float = 0.0
+		var welding: bool = false
+		if u < 0.12:
+			var k: float = u / 0.12
+			torch_x = lerpf(weld_x_home, start_local.x, k)
+			torch_z = lerpf(home_z, seam_torch_z, k)
+		elif u < 0.2:
+			torch_y = lerpf(home_y, low_y, (u - 0.12) / 0.08)
+		elif u < 0.8:
+			progress = (u - 0.2) / 0.6
+			torch_x = lerpf(start_local.x, end_local.x, progress)
+			torch_y = low_y
+			welding = true
+		elif u < 0.88:
+			progress = 1.0
+			torch_x = end_local.x
+			torch_y = lerpf(low_y, home_y, (u - 0.8) / 0.08)
+		else:
+			progress = 1.0
+			var back: float = (u - 0.88) / 0.12
+			torch_x = lerpf(end_local.x, weld_x_home, back)
+			torch_z = lerpf(seam_torch_z, home_z, back)
+		weld_x_node.position.x = torch_x
+		weld_z_node.position = Vector3(weld_z_home.x, torch_y, torch_z)
+		_set_weld_extension(home_y - torch_y + 0.05 if home_y - torch_y > 0.002 else 0.0)
+		weld_arc_mesh.visible = welding
+		weld_arc_light.visible = welding
+		weld_sparks.emitting = welding
+		if welding:
+			weld_arc_light.light_energy = randf_range(2.0, 7.0)
+			weld_arc_mesh.scale = Vector3.ONE * randf_range(0.7, 1.3)
+		# Bead grows behind the torch along the seam (part local x).
+		var bead_end_x: float = lerpf(start_x, end_x, progress)
+		var bead_length: float = maxf(bead_end_x - start_x, 0.001)
+		bead.scale = Vector3(bead_length, 1.0, 1.0)
+		bead.position = Vector3(start_x + bead_length / 2.0, SHEET_CENTRE.y, SHEET_CENTRE.z + seam_z)
+		await get_tree().process_frame
+		elapsed += get_process_delta_time()
+
+	if is_instance_valid(bead):
+		bead.scale = Vector3(end_x - start_x, 1.0, 1.0)
+		bead.position = Vector3(0.0, SHEET_CENTRE.y, SHEET_CENTRE.z + seam_z)
+		bead.material_override = _metal_material(Color(0.32, 0.36, 0.42))
+	_park_welder()
+
+
+# Inspection: a green scan line sweeps over the part, then a green (pass) or
+# red (fail) tag is left on the sheet. The tag stays until reset.
+func _inspection_effect(duration: float) -> void:
+	var root: Node3D = _new_fx_root()
+	var z_min: float = -0.34
+	var z_max: float = 0.34
+
+	var scan_mesh: BoxMesh = BoxMesh.new()
+	scan_mesh.size = Vector3(1.3, 0.006, 0.014)
+	var scan: MeshInstance3D = _fx_mesh(root, scan_mesh, _glow_material(Color(0.2, 1.0, 0.5), 4.0), Vector3(0.0, 0.0, z_min), \"ScanLine\")
+	_fx_light(scan, Color(0.3, 1.0, 0.6), 1.2, 1.2, Vector3(0.0, 0.25, 0.0))
+
+	var elapsed: float = 0.0
+	while elapsed < duration and is_instance_valid(root):
+		var sweep: float = 1.0 - absf(fposmod(elapsed / duration * 2.0, 2.0) - 1.0)
+		scan.position.z = lerpf(z_min, z_max, sweep)
+		await get_tree().process_frame
+		elapsed += get_process_delta_time()
+	if is_instance_valid(root):
+		root.queue_free()
+
+	var passed: bool = randf() <= inspection_pass_rate
+	var old_tag: Node = part.get_node_or_null(\"ResultTag\")
+	if old_tag != null:
+		part.remove_child(old_tag)
+		old_tag.queue_free()
+	var tag_mesh: BoxMesh = BoxMesh.new()
+	tag_mesh.size = Vector3(0.12, 0.01, 0.12)
+	var tag_color: Color = Color(0.1, 1.0, 0.3) if passed else Color(1.0, 0.1, 0.1)
+	_fx_mesh(part, tag_mesh, _glow_material(tag_color, 3.0), Vector3(0.45, SHEET_CENTRE.y, -0.4), \"ResultTag\")
+	set_status(\"Inspection result for part %d: %s\" % [part_id, \"PASS\" if passed else \"FAIL\"])
+
+
 # Bender-specific choreography. Sheet stays attached to the suction tool.
 var bender_ram: Node3D
 var bender_ram_home: Vector3
@@ -478,7 +948,8 @@ func pose_for_sheet(world_position: Vector3, tilt_degrees: float) -> Dictionary:
 	}
 
 func bend_grip_position(hinge: Vector3, tilt_degrees: float) -> Vector3:
-	return hinge + Basis(Vector3.RIGHT, deg_to_rad(tilt_degrees)) * Vector3(0, 0, 0.5)
+	# The bend line is at sheet z = -0.5, so the grip is (grip_local.z + 0.5) from the hinge.
+	return hinge + Basis(Vector3.RIGHT, deg_to_rad(tilt_degrees)) * Vector3(0, 0, grip_local.z + 0.5)
 
 func visit_bender() -> bool:
 	if not is_instance_valid(bender_ram):
@@ -502,7 +973,8 @@ func visit_bender() -> bool:
 		if pose_for_sheet(bend_grip_position(hinge, -8.0 * t), -8.0 * t).is_empty():
 			return false
 	# Contact transform uses a repeatable, off-centre grip on the flat front panel.
-	part.transform = Transform3D(pickup_point.global_transform.basis.inverse(), Vector3(0, part_attach_offset_y, 0))
+	var tool_basis_inverse: Basis = pickup_point.global_transform.basis.inverse()
+	part.transform = Transform3D(tool_basis_inverse, Vector3(0, part_attach_offset_y, 0) - tool_basis_inverse * grip_local)
 	set_status(\"Bender: tilting and inserting the sheet\")
 	await move_to_pose(approach)
 	await move_to_pose(entry, 1.2)
@@ -2695,7 +3167,7 @@ multimesh = SubResource("RailBatch_CableServiceLoop")
 [node name="WorkPieces" type="Node3D" parent="." unique_id=911472083]
 
 [node name="Part01" type="Node3D" parent="WorkPieces" unique_id=1807876620]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1.075, -2.72)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1.075, -2.47)
 script = SubResource("Script_BendableSheet")
 
 [node name="PartMesh" type="MeshInstance3D" parent="WorkPieces/Part01" unique_id=1579539128]
@@ -2705,7 +3177,7 @@ mesh = SubResource("BoxMesh_nb4f5")
 [node name="ProcessTargets" type="Node3D" parent="." unique_id=791537972]
 
 [node name="LaserTarget" type="Marker3D" parent="ProcessTargets" unique_id=665142539]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1.075, -2.72)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1.075, -2.47)
 
 [node name="BenderTarget" type="Marker3D" parent="ProcessTargets" unique_id=623372664]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 1.1175, -1.94)
